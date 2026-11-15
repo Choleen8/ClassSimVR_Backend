@@ -1,0 +1,32 @@
+[project]
+name = "classsimvr"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "@me.Jaysandoval", email = "sandovaljayemmanuel@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "httpx",
+    "google-genai",
+    "psycopg[binary]",
+    "pydantic",
+    "python-dotenv",
+    "SQLAlchemy",
+    "edge-tts==7.3.1",
+    "sounddevice",
+    "numpy",
+    "faster-whisper",
+]
+
+[project.scripts]
+classsimvr = "classsimvr:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"

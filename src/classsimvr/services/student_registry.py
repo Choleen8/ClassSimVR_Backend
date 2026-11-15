@@ -1,0 +1,298 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from threading import RLock
+from typing import Any
+
+
+class StudentRegistryError(ValueError):
+    pass
+
+
+class DuplicateStudentError(StudentRegistryError):
+    pass
+
+
+class StudentNotFoundError(StudentRegistryError):
+    pass
+
+
+def _key(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().casefold())
+
+
+def _match_key(value: str) -> str:
+    """Normalize speech punctuation without changing stored student IDs."""
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    without_accents = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", without_accents)).strip()
+
+
+_LEGACY_STUDENT_IDS = {"berto-eco": "robert-eco"}
+
+
+def _canonical_student_id(value: str) -> str:
+    normalized = _key(value)
+    return _LEGACY_STUDENT_IDS.get(normalized, normalized)
+
+
+@dataclass(frozen=True)
+class StudentProfile:
+    student_id: str
+    name: str
+    aliases: tuple[str, ...] = ()
+    personality: str = "a respectful Filipino VR student"
+    language: str = "English"
+    voice: str | None = None
+    initial_state: str = "engaged"
+
+    def normalized_aliases(self) -> tuple[str, ...]:
+        values = [self.student_id, self.name, *self.aliases]
+        return tuple(dict.fromkeys(_match_key(value) for value in values if value.strip()))
+
+
+@dataclass
+class StudentSessionState:
+    current_state: str = "engaged"
+    emotion: str = "neutral"
+    summary: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StudentResolution:
+    """Result of resolving a spoken student reference."""
+
+    profile: StudentProfile | None
+    ambiguous: bool = False
+    matched_aliases: tuple[str, ...] = ()
+
+
+DEFAULT_STUDENT_PROFILES = (
+    StudentProfile(
+        student_id="maria-sandoval",
+        name="Maria Sandoval",
+        aliases=("maria",),
+        personality="Maria is a respectful Filipino VR student.",
+        language="English",
+        voice="fil-PH-BlessicaNeural",
+    ),
+    StudentProfile(
+        student_id="robert-eco",
+        name="Robert Eco",
+        aliases=("robert", "berto", "robert eco", "berto eco"),
+        personality="Robert is a thoughtful Filipino VR student.",
+        language="English",
+        voice="fil-PH-AngeloNeural",
+    ),
+)
+
+
+class StudentRegistry:
+    """Thread-safe runtime registry for dynamic learner profiles and state."""
+
+    _CONVERSATION_HISTORY_LIMIT = 12
+
+    def __init__(self, profiles: tuple[StudentProfile, ...] = ()) -> None:
+        self._lock = RLock()
+        self._profiles: dict[str, StudentProfile] = {}
+        self._aliases: dict[str, str] = {}
+        self._states: dict[str, dict[str, StudentSessionState]] = {}
+        for profile in profiles:
+            self.register(profile)
+
+    @classmethod
+    def with_defaults(cls) -> "StudentRegistry":
+        registry = cls(DEFAULT_STUDENT_PROFILES)
+        configured = os.getenv("CLASSSIMVR_STUDENTS_JSON", "").strip()
+        if configured:
+            registry.load_json(configured, replace=False)
+        return registry
+
+    def register(self, profile: StudentProfile) -> StudentProfile:
+        student_id = _canonical_student_id(profile.student_id)
+        if not student_id or not profile.name.strip():
+            raise StudentRegistryError("student_id and name must not be blank")
+        normalized = StudentProfile(
+            student_id=student_id,
+            name=profile.name.strip(),
+            aliases=tuple(alias.strip() for alias in profile.aliases if alias.strip()),
+            personality=profile.personality.strip(),
+            language=profile.language.strip() or "English",
+            voice=profile.voice.strip() if profile.voice else None,
+            initial_state=profile.initial_state.strip() or "engaged",
+        )
+        with self._lock:
+            if student_id in self._profiles:
+                raise DuplicateStudentError(f"student '{student_id}' is already registered")
+            for alias in normalized.normalized_aliases():
+                owner = self._aliases.get(alias)
+                if owner is not None:
+                    raise DuplicateStudentError(f"student alias '{alias}' is already registered")
+            self._profiles[student_id] = normalized
+            for alias in normalized.normalized_aliases():
+                self._aliases[alias] = student_id
+        return normalized
+
+    def list_students(self) -> list[StudentProfile]:
+        with self._lock:
+            return list(self._profiles.values())
+
+    def get(self, student_id: str) -> StudentProfile:
+        with self._lock:
+            try:
+                return self._profiles[_canonical_student_id(student_id)]
+            except KeyError as error:
+                raise StudentNotFoundError(f"student '{student_id}' was not found") from error
+
+    def resolve(self, text: str) -> StudentProfile | None:
+        return self.resolve_with_status(text).profile
+
+    def resolve_with_status(self, text: str) -> StudentResolution:
+        normalized_text = _match_key(text)
+        with self._lock:
+            matches = [
+                (alias, self._profiles[student_id])
+                for alias, student_id in self._aliases.items()
+                if re.search(rf"\b{re.escape(alias)}\b", normalized_text)
+            ]
+        if not matches:
+            return StudentResolution(profile=None)
+        longest = max(len(alias) for alias, _ in matches)
+        top_matches = [(alias, profile) for alias, profile in matches if len(alias) == longest]
+        profiles = {profile.student_id: profile for _, profile in top_matches}
+        aliases = tuple(alias for alias, _ in top_matches)
+        if len(profiles) != 1:
+            return StudentResolution(profile=None, ambiguous=True, matched_aliases=aliases)
+        return StudentResolution(profile=next(iter(profiles.values())), matched_aliases=aliases)
+
+    def get_session_state(self, session_id: str, student_id: str) -> StudentSessionState:
+        profile = self.get(student_id)
+        with self._lock:
+            session_states = self._states.setdefault(str(session_id), {})
+            return session_states.setdefault(
+                profile.student_id,
+                StudentSessionState(current_state=profile.initial_state),
+            )
+
+    def update_session_state(
+        self,
+        session_id: str,
+        student_id: str,
+        *,
+        current_state: str | None = None,
+        emotion: str | None = None,
+        summary: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> StudentSessionState:
+        state = self.get_session_state(session_id, student_id)
+        with self._lock:
+            if current_state is not None:
+                state.current_state = current_state
+            if emotion is not None:
+                state.emotion = emotion
+            if summary is not None:
+                state.summary = summary
+            if data:
+                state.data.update(data)
+            return state
+
+    def get_conversation_memory(self, session_id: str, student_id: str) -> dict[str, Any]:
+        """Return bounded recent turns plus durable recall metadata for one student session."""
+        state = self.get_session_state(session_id, student_id)
+        with self._lock:
+            return {
+                "first_teacher_question": str(state.data.get("first_teacher_question", "")),
+                "summary": str(state.data.get("conversation_summary", "")),
+                "recent_turns": [dict(turn) for turn in state.data.get("conversation_history", [])],
+            }
+
+    def record_conversation_turn(
+        self,
+        session_id: str,
+        student_id: str,
+        teacher_text: str,
+        student_text: str,
+    ) -> StudentSessionState:
+        """Persist an exact teacher/student exchange without sharing it across students."""
+        state = self.get_session_state(session_id, student_id)
+        teacher_text = teacher_text.strip()
+        student_text = student_text.strip()
+        if not teacher_text:
+            return state
+        with self._lock:
+            history = [dict(turn) for turn in state.data.get("conversation_history", [])]
+            if not state.data.get("first_teacher_question"):
+                state.data["first_teacher_question"] = teacher_text
+            history.append({"speaker": "teacher", "text": teacher_text[:4000]})
+            if student_text:
+                history.append({"speaker": "student", "text": student_text[:4000]})
+            older = history[:-self._CONVERSATION_HISTORY_LIMIT]
+            first_question = state.data["first_teacher_question"]
+            summary = f"first_teacher_question={first_question}"
+            if older:
+                summary += "; earlier_turns=" + " | ".join(
+                    f"{turn['speaker']}: {turn['text']}" for turn in older
+                )
+            state.data["conversation_history"] = history[-self._CONVERSATION_HISTORY_LIMIT :]
+            state.data["conversation_summary"] = summary[:12000]
+            state.data["conversation_turn_count"] = int(state.data.get("conversation_turn_count", 0)) + 1
+            return state
+
+    def reset_session(self, session_id: str, student_id: str | None = None) -> None:
+        """Explicitly clear conversation memory while retaining registered profiles."""
+        with self._lock:
+            session_states = self._states.get(str(session_id))
+            if not session_states:
+                return
+            if student_id:
+                states = [session_states[student_id]] if student_id in session_states else []
+            else:
+                states = list(session_states.values())
+            for state in states:
+                for key in (
+                    "first_teacher_question",
+                    "conversation_summary",
+                    "conversation_history",
+                    "conversation_turn_count",
+                ):
+                    state.data.pop(key, None)
+
+    def load_json(self, raw: str, *, replace: bool = False) -> list[StudentProfile]:
+        payload = json.loads(raw)
+        if isinstance(payload, dict):
+            payload = payload.get("students", [])
+        if not isinstance(payload, list):
+            raise StudentRegistryError("student configuration must be a JSON list")
+        if replace:
+            with self._lock:
+                self._profiles.clear()
+                self._aliases.clear()
+        loaded: list[StudentProfile] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                raise StudentRegistryError("each student configuration must be an object")
+            raw_student_id = str(item["student_id"])
+            canonical_student_id = _canonical_student_id(raw_student_id)
+            if (
+                _key(raw_student_id) != canonical_student_id
+                and canonical_student_id in self._profiles
+                and not replace
+            ):
+                loaded.append(self.get(canonical_student_id))
+                continue
+            profile = StudentProfile(
+                student_id=canonical_student_id,
+                name=str(item["name"]),
+                aliases=tuple(str(alias) for alias in item.get("aliases", [])),
+                personality=str(item.get("personality", "a respectful Filipino VR student")),
+                language=str(item.get("language", "English")),
+                voice=str(item["voice"]) if item.get("voice") else None,
+                initial_state=str(item.get("initial_state", "engaged")),
+            )
+            loaded.append(self.register(profile))
+        return loaded

@@ -1,0 +1,301 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import logging
+import re
+import time
+import unicodedata
+
+from .behavior import BehaviorService, classify_teacher_input
+from .contracts import BehaviorRequest, BehaviorResponse
+from .tts import TextToSpeechService
+from .student_registry import StudentProfile, StudentRegistry
+
+
+StudentRoute = StudentProfile
+logger = logging.getLogger(__name__)
+
+_ADDRESS_STOP_WORDS = {
+    "a", "all", "an", "and", "ano", "are", "bang", "bakit", "can", "class", "classroom",
+    "could", "down", "everyone", "explain", "hand", "how", "iba", "it", "lahat", "lower",
+    "me", "na", "please", "raise", "sit", "sino", "stand", "students", "tell", "the", "to",
+    "tumayo", "umupo", "up", "upo", "what", "when", "where", "who", "why", "will", "would",
+    "you", "ka", "mo", "kayo", "pwede", "puwede", "ng", "ngayon", "than", "down",
+}
+_DIRECT_ADDRESS_CUES = {
+    "stand", "up", "sit", "down", "please", "tumayo", "tayo", "umupo", "upo",
+    "maupo", "introduce", "explain", "tell", "magpakilala", "pakilala", "raise", "lower",
+    "itaas", "ibaba",
+}
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    target: str
+    responses: list[BehaviorResponse]
+
+
+DEFAULT_STUDENTS = StudentRegistry.with_defaults().list_students()
+
+
+class MicrophoneCommandRouter:
+    def __init__(
+        self,
+        *,
+        behavior: BehaviorService,
+        tts: TextToSpeechService,
+        registry: StudentRegistry | None = None,
+        students: tuple[StudentRoute, ...] | list[StudentRoute] | None = None,
+    ) -> None:
+        self.behavior = behavior
+        self.tts = tts
+        self.registry = registry or StudentRegistry(tuple(students or DEFAULT_STUDENTS))
+        self._last_latency_ms = {
+            "command_recognition": None,
+            "student_name_detection": None,
+            "student_routing": None,
+            "conversation_memory_retrieval": None,
+            "llm_generation": None,
+            "tts_generation": None,
+            "response_queue": None,
+            "response_delivery": None,
+            "total_response": None,
+        }
+
+    def handle(
+        self,
+        transcript: str,
+        *,
+        session_id: str,
+        scene_state: str = "",
+        session_summary: str = "",
+        recent_turns: list[dict[str, str]] | None = None,
+        default_persona_id: str = "maria-sandoval",
+    ) -> CommandResult:
+        pipeline_started = time.perf_counter()
+        command_started = time.perf_counter()
+        intent = classify_teacher_input(transcript)
+        self._last_latency_ms["command_recognition"] = round(
+            (time.perf_counter() - command_started) * 1000, 2
+        )
+        routing_started = time.perf_counter()
+        target_students = self._targets(transcript, default_persona_id)
+        self._last_latency_ms["student_routing"] = round(
+            (time.perf_counter() - routing_started) * 1000, 2
+        )
+        responses: list[BehaviorResponse] = []
+        classroom_wide = self._is_classroom_wide(transcript)
+        if not target_students:
+            self._last_latency_ms["total_response"] = round(
+                (time.perf_counter() - pipeline_started) * 1000, 2
+            )
+            return CommandResult(target="none", responses=[])
+        memory_ms = 0.0
+        tts_ms = 0.0
+        for student in target_students:
+            memory_started = time.perf_counter()
+            memory = self.registry.get_conversation_memory(session_id, student.student_id)
+            memory_ms += (time.perf_counter() - memory_started) * 1000
+            history = memory["recent_turns"] or list(recent_turns or [])
+            name_only_address = self._is_name_only_address(transcript, student)
+            request = BehaviorRequest(
+                session_id=session_id,
+                persona_id=student.student_id,
+                persona_name=student.name,
+                persona_profile=student.personality,
+                language=student.language,
+                trainee_input=transcript,
+                scene_state=scene_state,
+                session_summary=self._session_summary(
+                    session_id, student, session_summary, memory["summary"]
+                ),
+                recent_turns=history,
+                clarification_required=(
+                    not name_only_address
+                    and intent.action == "NONE"
+                    and not intent.speak
+                ),
+                name_only_address=name_only_address,
+                acknowledgment_required=not classroom_wide,
+            )
+            reply = self.behavior.generate_reply(request)
+            behavior_latency = getattr(self.behavior, "latency_status", lambda: {})()
+            if behavior_latency.get("llm_generation") is not None:
+                self._last_latency_ms["llm_generation"] = behavior_latency["llm_generation"]
+            self.registry.update_session_state(
+                session_id,
+                student.student_id,
+                emotion=reply.emotion,
+                summary=reply.dialogue or None,
+                data={"last_action": reply.action},
+            )
+            if reply.speak and reply.dialogue:
+                tts_started = time.perf_counter()
+                try:
+                    reply = reply.model_copy(update={
+                        "audio_url": self.tts.synthesize(
+                            reply.dialogue,
+                            f"{session_id}-{student.student_id}",
+                            persona_id=student.student_id,
+                            persona_name=student.name,
+                            voice=student.voice,
+                        )
+                    })
+                except Exception as error:
+                    print(f"Edge TTS request failed: {type(error).__name__}: {error}")
+                    reply = reply.model_copy(update={"audio_url": None})
+                finally:
+                    tts_ms += (time.perf_counter() - tts_started) * 1000
+            else:
+                reply = reply.model_copy(update={"audio_url": None})
+            responses.append(reply)
+            if reply.speak or reply.dialogue:
+                self.registry.record_conversation_turn(
+                    session_id,
+                    student.student_id,
+                    transcript,
+                    reply.dialogue,
+                )
+        self._last_latency_ms["conversation_memory_retrieval"] = round(memory_ms, 2)
+        self._last_latency_ms["tts_generation"] = round(tts_ms, 2)
+        self._last_latency_ms["total_response"] = round(
+            (time.perf_counter() - pipeline_started) * 1000, 2
+        )
+        target = "classroom" if len(target_students) > 1 else target_students[0].student_id
+        return CommandResult(target=target, responses=responses)
+
+    def latency_status(self) -> dict:
+        return dict(self._last_latency_ms)
+
+    def _targets(self, transcript: str, default_persona_id: str) -> list[StudentRoute]:
+        text = transcript.casefold()
+        name_started = time.perf_counter()
+        resolution = self.registry.resolve_with_status(text)
+        self._last_latency_ms["student_name_detection"] = round(
+            (time.perf_counter() - name_started) * 1000, 2
+        )
+        if resolution.ambiguous:
+            logger.warning(
+                "Student routing rejected ambiguous address transcript=%r aliases=%s",
+                transcript,
+                resolution.matched_aliases,
+            )
+            return []
+        if resolution.profile is not None:
+            if not self._is_direct_address(transcript, resolution.profile):
+                logger.info(
+                    "Student routing ignored incidental name mention transcript=%r student=%s",
+                    transcript,
+                    resolution.profile.student_id,
+                )
+                return []
+            logger.info(
+                "Student routing matched transcript=%r student=%s aliases=%s",
+                transcript,
+                resolution.profile.student_id,
+                resolution.matched_aliases,
+            )
+            return [resolution.profile]
+
+        if self._has_explicit_address(transcript):
+            logger.warning(
+                "Student routing rejected unrecognized explicit address transcript=%r",
+                transcript,
+            )
+            return []
+
+        classroom_wide = self._is_classroom_wide(transcript)
+        if classroom_wide:
+            if self._is_autonomous_hand_raise_request(text):
+                logger.info("Classroom-wide hand-raise request is pending; keeping it silent")
+                return []
+            return self.registry.list_students()
+        logger.info("No explicit student address; ignoring individual transcript=%r", transcript)
+        return []
+
+    @staticmethod
+    def _is_classroom_wide(transcript: str) -> bool:
+        text = transcript.casefold()
+        return any(
+            phrase in text
+            for phrase in (
+                "everyone", "all students", "buong klase", "classroom", "lahat",
+                "who wants to answer", "sino ang gustong sumagot", "sino ang nakakaalam",
+            )
+        )
+
+    @staticmethod
+    def _is_autonomous_hand_raise_request(text: str) -> bool:
+        return any(
+            phrase in text
+            for phrase in ("who wants to answer", "sino ang gustong sumagot", "sino ang nakakaalam")
+        )
+
+    @staticmethod
+    def _normalized_address_text(transcript: str) -> str:
+        decomposed = unicodedata.normalize("NFKD", transcript.casefold())
+        transcript_ascii = "".join(
+            char for char in decomposed if not unicodedata.combining(char)
+        )
+        return re.sub(
+            r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", transcript_ascii)
+        ).strip()
+
+    @classmethod
+    def _is_direct_address(cls, transcript: str, student: StudentRoute) -> bool:
+        normalized = cls._normalized_address_text(transcript)
+        punctuation_text = cls._normalized_address_with_punctuation(transcript)
+        for alias in sorted(student.normalized_aliases(), key=len, reverse=True):
+            if normalized == alias or normalized.startswith(f"{alias} "):
+                return True
+            if re.search(rf",\s*{re.escape(alias)}(?:[.!?]|$)", punctuation_text):
+                return True
+            if normalized.endswith(f" {alias}"):
+                prefix = normalized[: -(len(alias) + 1)].split()
+                if _DIRECT_ADDRESS_CUES.intersection(prefix):
+                    return True
+        return False
+
+    @staticmethod
+    def _normalized_address_with_punctuation(transcript: str) -> str:
+        decomposed = unicodedata.normalize("NFKD", transcript.casefold())
+        transcript_ascii = "".join(
+            char for char in decomposed if not unicodedata.combining(char)
+        )
+        return re.sub(r"\s+", " ", transcript_ascii).strip()
+
+    @classmethod
+    def _is_name_only_address(cls, transcript: str, student: StudentRoute) -> bool:
+        normalized = cls._normalized_address_text(transcript)
+        for alias in sorted(student.normalized_aliases(), key=len, reverse=True):
+            normalized = re.sub(rf"\b{re.escape(alias)}\b", " ", normalized)
+        return not re.sub(r"\s+", "", normalized)
+
+    def _has_explicit_address(self, transcript: str) -> bool:
+        """Detect likely name-addressed speech when registry matching failed."""
+        segments = [segment.strip() for segment in re.split(r"[,!?]", transcript) if segment.strip()]
+        candidates: list[str] = []
+        if len(segments) >= 2:
+            candidates.extend((segments[0], segments[-1]))
+        else:
+            tokens = re.findall(r"[a-z0-9']+", transcript.casefold())
+            if tokens:
+                candidates.append(tokens[0])
+        for candidate in candidates:
+            tokens = re.findall(r"[a-z0-9']+", candidate.casefold())
+            if tokens and not any(token in _ADDRESS_STOP_WORDS for token in tokens):
+                return True
+        return False
+
+    def _session_summary(
+        self,
+        session_id: str,
+        student: StudentRoute,
+        summary: str,
+        conversation_summary: str = "",
+    ) -> str:
+        state = self.registry.get_session_state(session_id, student.student_id)
+        parts = [summary, conversation_summary, f"state={state.current_state}", f"emotion={state.emotion}"]
+        if state.summary:
+            parts.append(f"memory={state.summary}")
+        return "; ".join(part for part in parts if part)

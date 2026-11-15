@@ -1,0 +1,73 @@
+# ClassSim VR
+
+ClassSim VR provides a PostgreSQL-backed model layer and a token-bounded learner-behavior service for the VR teaching simulation.
+
+## Run the behavior API
+
+Set `OPENAI_API_KEY` in `.env`, then start the local API from the project root:
+
+```powershell
+uvicorn classsimvr.app:app --reload
+```
+
+The first service endpoint is:
+
+```text
+POST /sessions/{session_id}/turn
+```
+
+The behavior service sends bounded persona, scene, summary, and recent-turn context to OpenAI. It limits output length, retries transient failures a fixed number of times, and returns a local fallback response when the provider is unavailable. Automated tests use an injected fake client and do not make network calls.
+
+## Unreal integration contract
+
+Use the versioned JSON API from Unreal:
+
+```text
+GET  /api/v1/health
+POST /api/v1/sessions/{session_id}/students/generate
+POST /api/v1/sessions
+POST /api/v1/sessions/{session_id}/start
+POST /api/v1/sessions/{session_id}/pause
+POST /api/v1/sessions/{session_id}/resume
+POST /api/v1/sessions/{session_id}/complete
+POST /api/v1/sessions/{session_id}/reset
+POST /api/v1/personas
+GET  /api/v1/personas
+GET  /api/v1/trainees/{trainee_id}/personas
+POST /api/v1/sessions/{session_id}/personas
+GET  /api/v1/sessions/{session_id}/personas
+PATCH /api/v1/sessions/{session_id}/personas/{persona_id}
+POST /api/v1/sessions/{session_id}/personas/{persona_id}/turn
+POST /api/v1/sessions/{session_id}/turns
+PUT  /api/v1/sessions/{session_id}/consent
+DELETE /api/v1/sessions/{session_id}/consent
+POST /api/v1/sessions/{session_id}/recording/start
+POST /api/v1/sessions/{session_id}/recording/complete
+GET  /api/v1/assessment/rubric
+POST /api/v1/sessions/{session_id}/assessment
+GET  /api/v1/assessment/jobs/{job_id}
+POST /api/v1/assessment/jobs/{job_id}/result
+GET  /api/v1/sessions/{session_id}/report
+```
+
+The versioned turn request contains only client context:
+
+```json
+{
+  "trainee_input": "What is one half?",
+  "scene_state": "teacher is demonstrating fractions",
+  "recent_turns": []
+}
+```
+
+The server resolves the assigned persona and current runtime state, then returns `persona_id`, `dialogue`, `emotion`, `action`, `fallback`, and optional token usage. This keeps Unreal independent from PostgreSQL and prevents client state from overwriting the persona profile.
+
+Use the trainee persona list endpoint to populate a student's available personas across all of that student's sessions. It returns distinct persona profiles; use the session persona endpoint when the current runtime state for a specific session is needed.
+
+The endpoints use stable `/api/v1` paths, integer IDs, bounded JSON fields, and ordinary HTTP. Keep Unreal calls behind a small API adapter so a future WebSocket or voice transport can be added without changing gameplay code.
+
+## Privacy and compliance
+
+The project includes a Philippine privacy/compliance baseline and a privacy-notice template in `docs/compliance/`. Consent now records its purpose and notice version, supports withdrawal, and prevents new recording after withdrawal. These are technical safeguards only; production use still requires the institution's DPO, privacy impact assessment, ethics approval, retention/deletion process, vendor review, security controls, and legal sign-off.
+
+If recording consent is withdrawn during a lesson, the lesson may continue, but the session is marked `not_gradable`. Assessment requests return HTTP 409 with `code: recording_consent_withdrawn` and the message `Recording consent was withdrawn; this session cannot be graded.` Unreal should show that message, disable grading UI, and keep the lesson active.
