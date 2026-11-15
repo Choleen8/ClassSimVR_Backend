@@ -11,6 +11,7 @@ from .routes.assessment import router as assessment_router
 from .routes.turns import router as turn_router
 from .routes.microphone import microphone_manager, router as microphone_router
 from .routes.students import router as student_registry_router
+from .routes.websocket import router as websocket_router
 
 app = FastAPI(title="ClassSim VR API")
 audio_dir = Path(__file__).resolve().parents[2] / "audio"
@@ -25,6 +26,7 @@ app.include_router(assessment_router)
 app.include_router(turn_router)
 app.include_router(microphone_router)
 app.include_router(student_registry_router)
+app.include_router(websocket_router)
 
 
 @app.on_event("shutdown")
