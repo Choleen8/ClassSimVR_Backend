@@ -23,6 +23,9 @@ class StudentRegistrationBody(BaseModel):
     language: str = Field(default="English", max_length=40)
     voice: str | None = Field(default=None, max_length=120)
     initial_state: str = Field(default="engaged", max_length=50)
+    knowledge_level: str = Field(default="intermediate", max_length=40)
+    confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    willingness: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class StudentStateBody(BaseModel):
@@ -40,6 +43,9 @@ class StudentResponse(BaseModel):
     language: str
     voice: str | None
     initial_state: str
+    knowledge_level: str
+    confidence: float
+    willingness: float
 
 
 class StudentStateResponse(BaseModel):
@@ -64,6 +70,9 @@ def _student_response(profile: StudentProfile) -> StudentResponse:
         language=profile.language,
         voice=profile.voice,
         initial_state=profile.initial_state,
+        knowledge_level=profile.knowledge_level,
+        confidence=profile.confidence,
+        willingness=profile.willingness,
     )
 
 
@@ -93,6 +102,9 @@ def register_student(
                 language=body.language,
                 voice=body.voice,
                 initial_state=body.initial_state,
+                knowledge_level=body.knowledge_level,
+                confidence=body.confidence,
+                willingness=body.willingness,
             )
         )
     except DuplicateStudentError as error:

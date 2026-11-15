@@ -56,6 +56,7 @@ class MicrophoneCommandRouter:
             "student_routing": None,
             "conversation_memory_retrieval": None,
             "llm_generation": None,
+            "classroom_volunteer_decision": None,
             "tts_generation": None,
             "response_queue": None,
             "response_delivery": None,
@@ -79,10 +80,19 @@ class MicrophoneCommandRouter:
             (time.perf_counter() - command_started) * 1000, 2
         )
         routing_started = time.perf_counter()
+        if self._is_autonomous_hand_raise_request(transcript):
+            result = self._handle_classroom_invitation(session_id)
+            self._last_latency_ms["total_response"] = round(
+                (time.perf_counter() - pipeline_started) * 1000, 2
+            )
+            return result
+        intent = classify_teacher_input(transcript)
         target_students = self._targets(transcript, default_persona_id)
         self._last_latency_ms["student_routing"] = round(
             (time.perf_counter() - routing_started) * 1000, 2
         )
+        if intent.speak:
+            self.registry.record_classroom_question(session_id, transcript)
         responses: list[BehaviorResponse] = []
         classroom_wide = self._is_classroom_wide(transcript)
         if not target_students:
@@ -164,6 +174,49 @@ class MicrophoneCommandRouter:
         target = "classroom" if len(target_students) > 1 else target_students[0].student_id
         return CommandResult(target=target, responses=responses)
 
+    def _handle_classroom_invitation(self, session_id: str) -> CommandResult:
+        """Ask the behavior service for one independent decision per registered student."""
+        question = self.registry.get_classroom_question(session_id)
+        students = self.registry.list_students()
+        if not question or not students:
+            logger.info("Classroom invitation ignored because no latest question is available")
+            return CommandResult(target="classroom", responses=[])
+        round_number = self.registry.next_volunteer_round(session_id)
+        decide = getattr(self.behavior, "decide_classroom_volunteers", None)
+        if decide is None:
+            from .behavior import BehaviorService
+            decisions = BehaviorService._local_classroom_volunteer_decisions(
+                students, round_number=round_number
+            )
+        else:
+            decisions = decide(question, students, round_number=round_number)
+        allowed_ids = {student.student_id for student in students}
+        responses: list[BehaviorResponse] = []
+        for student in students:
+            action = decisions.get(student.student_id, "NONE") if isinstance(decisions, dict) else "NONE"
+            if student.student_id not in allowed_ids or action not in {"RAISE_HAND", "NONE"}:
+                logger.warning("Rejected invalid volunteer decision student=%s action=%s", student.student_id, action)
+                continue
+            if action == "RAISE_HAND":
+                self.registry.update_session_state(
+                    session_id,
+                    student.student_id,
+                    data={"last_action": "RAISE_HAND", "hand_raised": True, "volunteer_round": round_number},
+                )
+                responses.append(BehaviorResponse(
+                    persona_id=student.student_id,
+                    dialogue="",
+                    emotion="eager",
+                    action="RAISE_HAND",
+                    speak=False,
+                    audio_url=None,
+                    fallback=False,
+                ))
+        latency = getattr(self.behavior, "latency_status", lambda: {})().get("classroom_volunteer_decision")
+        if latency is not None:
+            self._last_latency_ms["classroom_volunteer_decision"] = latency
+        return CommandResult(target="classroom", responses=responses)
+
     def latency_status(self) -> dict:
         return dict(self._last_latency_ms)
 
@@ -206,9 +259,6 @@ class MicrophoneCommandRouter:
 
         classroom_wide = self._is_classroom_wide(transcript)
         if classroom_wide:
-            if self._is_autonomous_hand_raise_request(text):
-                logger.info("Classroom-wide hand-raise request is pending; keeping it silent")
-                return []
             return self.registry.list_students()
         logger.info("No explicit student address; ignoring individual transcript=%r", transcript)
         return []
@@ -216,20 +266,24 @@ class MicrophoneCommandRouter:
     @staticmethod
     def _is_classroom_wide(transcript: str) -> bool:
         text = transcript.casefold()
-        return any(
-            phrase in text
-            for phrase in (
+        return MicrophoneCommandRouter._is_autonomous_hand_raise_request(text) or any(
+            phrase in text for phrase in (
                 "everyone", "all students", "buong klase", "classroom", "lahat",
-                "who wants to answer", "sino ang gustong sumagot", "sino ang nakakaalam",
             )
         )
 
     @staticmethod
     def _is_autonomous_hand_raise_request(text: str) -> bool:
-        return any(
-            phrase in text
-            for phrase in ("who wants to answer", "sino ang gustong sumagot", "sino ang nakakaalam")
+        normalized = MicrophoneCommandRouter._normalized_address_text(text)
+        phrases = (
+            "who wants to answer", "who knows the answer", "who would like to answer",
+            "would anyone like to answer", "any volunteers", "who wants to try",
+            "who can answer", "sino ang gustong sumagot", "sino ang nakakaalam ng sagot",
+            "sino ang may sagot", "sino ang sasagot", "may gustong sumagot",
+            "sino ang gustong magbigay ng sagot", "who wants sumagot", "sino wants to answer",
+            "anyone gustong sumagot",
         )
+        return any(phrase in normalized for phrase in phrases)
 
     @staticmethod
     def _normalized_address_text(transcript: str) -> str:

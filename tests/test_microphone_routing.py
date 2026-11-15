@@ -345,3 +345,68 @@ def test_classroom_wide_posture_command_is_silent_for_all_students():
     assert result.target == "classroom"
     assert len(result.responses) == 2
     assert all(response.speak is False for response in result.responses)
+
+
+def test_classroom_invitation_returns_only_independent_volunteers_without_speech():
+    registry = StudentRegistry()
+    registry.register(StudentProfile(student_id="maria-sandoval", name="Maria Sandoval", aliases=("maria",)))
+    registry.register(StudentProfile(student_id="robert-eco", name="Robert Eco", aliases=("robert",)))
+
+    class VolunteerBehavior(FakeBehavior):
+        def decide_classroom_volunteers(self, question, students, *, round_number=0):
+            assert question == "What is a computer?"
+            return {"maria-sandoval": "RAISE_HAND", "robert-eco": "NONE"}
+
+    router = MicrophoneCommandRouter(
+        behavior=VolunteerBehavior(), tts=FakeTTS(), registry=registry
+    )
+    router.handle("What is a computer?", session_id="classroom")
+    result = router.handle("Who wants to answer?", session_id="classroom")
+
+    assert result.target == "classroom"
+    assert [response.persona_id for response in result.responses] == ["maria-sandoval"]
+    assert result.responses[0].action == "RAISE_HAND"
+    assert result.responses[0].dialogue == ""
+    assert result.responses[0].speak is False
+    assert result.responses[0].audio_url is None
+    assert registry.get_session_state("classroom", "maria-sandoval").current_state == "engaged"
+
+
+def test_tagalog_classroom_invitation_uses_latest_question_and_supports_zero_volunteers():
+    registry = StudentRegistry()
+    registry.register(StudentProfile(student_id="maria-sandoval", name="Maria Sandoval", aliases=("maria",)))
+
+    class NoVolunteerBehavior(FakeBehavior):
+        def decide_classroom_volunteers(self, question, students, *, round_number=0):
+            assert question == "Ano ang computer?"
+            return {"maria-sandoval": "NONE"}
+
+    router = MicrophoneCommandRouter(
+        behavior=NoVolunteerBehavior(), tts=FakeTTS(), registry=registry
+    )
+    router.handle("Ano ang computer?", session_id="classroom")
+    result = router.handle("Sino ang gustong sumagot?", session_id="classroom")
+
+    assert result.target == "classroom"
+    assert result.responses == []
+
+
+def test_semantic_taglish_invitation_routes_latest_question_to_batch_decider():
+    registry = StudentRegistry()
+    registry.register(StudentProfile(student_id="maria-sandoval", name="Maria Sandoval", aliases=("maria",)))
+
+    class VolunteerBehavior(FakeBehavior):
+        def decide_classroom_volunteers(self, question, students, *, round_number=0):
+            assert question == "What is a computer?"
+            return {"maria-sandoval": "RAISE_HAND"}
+
+    router = MicrophoneCommandRouter(
+        behavior=VolunteerBehavior(), tts=FakeTTS(), registry=registry
+    )
+    router.handle("What is a computer?", session_id="classroom")
+    result = router.handle("Anyone gustong sumagot?", session_id="classroom")
+
+    assert result.target == "classroom"
+    assert [response.persona_id for response in result.responses] == ["maria-sandoval"]
+    assert result.responses[0].action == "RAISE_HAND"
+    assert result.responses[0].speak is False

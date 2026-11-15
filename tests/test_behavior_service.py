@@ -4,6 +4,7 @@ import json
 from classsimvr.services.behavior import BehaviorService
 from classsimvr.services.contracts import BehaviorRequest
 from classsimvr.services.openai_client import OpenAIConfigurationError, create_openai_client
+from classsimvr.services.student_registry import StudentProfile
 from classsimvr.services.token_budget import TokenBudget, estimate_tokens
 
 
@@ -135,6 +136,75 @@ def test_classroom_wide_physical_command_can_remain_silent():
     assert result.action == "SIT"
     assert result.dialogue == ""
     assert result.speak is False
+
+
+def test_batch_classroom_decision_validates_ids_and_returns_independent_actions():
+    models = FakeModels([
+        '{"decisions":[{"persona_id":"maria-sandoval","action":"RAISE_HAND"},{"persona_id":"robert-eco","action":"NONE"}]}'
+    ])
+    service = BehaviorService(client=FakeClient(models))
+    students = [
+        StudentProfile(student_id="maria-sandoval", name="Maria Sandoval", personality="confident and curious"),
+        StudentProfile(student_id="robert-eco", name="Robert Eco", personality="quiet and thoughtful"),
+    ]
+
+    result = service.decide_classroom_volunteers("What is photosynthesis?", students)
+
+    assert result == {"maria-sandoval": "RAISE_HAND", "robert-eco": "NONE"}
+    assert len(models.calls) == 1
+
+
+def test_batch_classroom_decision_uses_local_fallback_when_provider_fails():
+    models = FakeModels([], failures=1)
+    service = BehaviorService(client=FakeClient(models), max_retries=0)
+    students = [
+        StudentProfile(
+            student_id="student-1",
+            name="Student One",
+            knowledge_level="advanced",
+            confidence=0.95,
+            willingness=0.95,
+        ),
+        StudentProfile(
+            student_id="student-2",
+            name="Student Two",
+            knowledge_level="beginner",
+            confidence=0.1,
+            willingness=0.1,
+        ),
+    ]
+
+    result = service.decide_classroom_volunteers("What is a computer?", students, round_number=1)
+
+    assert set(result) == {"student-1", "student-2"}
+    assert result["student-1"] == "RAISE_HAND"
+    assert result["student-2"] == "NONE"
+
+
+def test_batch_classroom_decision_supports_thirty_students_with_one_provider_call():
+    students = [
+        StudentProfile(
+            student_id=f"student-{index}",
+            name=f"Student {index}",
+            personality="curious and cooperative",
+            knowledge_level="intermediate",
+            confidence=0.6,
+            willingness=0.5,
+        )
+        for index in range(30)
+    ]
+    output = {"decisions": [
+        {"persona_id": student.student_id, "action": "RAISE_HAND" if index % 3 == 0 else "NONE"}
+        for index, student in enumerate(students)
+    ]}
+    models = FakeModels([json.dumps(output)])
+    service = BehaviorService(client=FakeClient(models))
+
+    result = service.decide_classroom_volunteers("What is a computer?", students)
+
+    assert len(result) == 30
+    assert sum(action == "RAISE_HAND" for action in result.values()) == 10
+    assert len(models.calls) == 1
 
 
 def test_combined_command_keeps_physical_action_and_speaks():

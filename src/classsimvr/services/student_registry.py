@@ -49,6 +49,9 @@ class StudentProfile:
     language: str = "English"
     voice: str | None = None
     initial_state: str = "engaged"
+    knowledge_level: str = "intermediate"
+    confidence: float = 0.6
+    willingness: float = 0.5
 
     def normalized_aliases(self) -> tuple[str, ...]:
         values = [self.student_id, self.name, *self.aliases]
@@ -80,6 +83,9 @@ DEFAULT_STUDENT_PROFILES = (
         personality="Maria is a respectful Filipino VR student.",
         language="English",
         voice="fil-PH-BlessicaNeural",
+        knowledge_level="intermediate",
+        confidence=0.7,
+        willingness=0.65,
     ),
     StudentProfile(
         student_id="robert-eco",
@@ -88,6 +94,9 @@ DEFAULT_STUDENT_PROFILES = (
         personality="Robert is a thoughtful Filipino VR student.",
         language="English",
         voice="fil-PH-AngeloNeural",
+        knowledge_level="intermediate",
+        confidence=0.65,
+        willingness=0.5,
     ),
 )
 
@@ -102,6 +111,8 @@ class StudentRegistry:
         self._profiles: dict[str, StudentProfile] = {}
         self._aliases: dict[str, str] = {}
         self._states: dict[str, dict[str, StudentSessionState]] = {}
+        self._classroom_questions: dict[str, str] = {}
+        self._volunteer_rounds: dict[str, int] = {}
         for profile in profiles:
             self.register(profile)
 
@@ -125,6 +136,9 @@ class StudentRegistry:
             language=profile.language.strip() or "English",
             voice=profile.voice.strip() if profile.voice else None,
             initial_state=profile.initial_state.strip() or "engaged",
+            knowledge_level=profile.knowledge_level.strip() or "intermediate",
+            confidence=min(1.0, max(0.0, float(profile.confidence))),
+            willingness=min(1.0, max(0.0, float(profile.willingness))),
         )
         with self._lock:
             if student_id in self._profiles:
@@ -246,6 +260,9 @@ class StudentRegistry:
     def reset_session(self, session_id: str, student_id: str | None = None) -> None:
         """Explicitly clear conversation memory while retaining registered profiles."""
         with self._lock:
+            if not student_id:
+                self._classroom_questions.pop(str(session_id), None)
+                self._volunteer_rounds.pop(str(session_id), None)
             session_states = self._states.get(str(session_id))
             if not session_states:
                 return
@@ -261,6 +278,24 @@ class StudentRegistry:
                     "conversation_turn_count",
                 ):
                     state.data.pop(key, None)
+
+    def record_classroom_question(self, session_id: str, question: str) -> None:
+        """Remember the latest classroom question for a later volunteer invitation."""
+        question = question.strip()
+        if question:
+            with self._lock:
+                self._classroom_questions[str(session_id)] = question[:4000]
+
+    def get_classroom_question(self, session_id: str) -> str:
+        with self._lock:
+            return self._classroom_questions.get(str(session_id), "")
+
+    def next_volunteer_round(self, session_id: str) -> int:
+        with self._lock:
+            key = str(session_id)
+            round_number = self._volunteer_rounds.get(key, 0) + 1
+            self._volunteer_rounds[key] = round_number
+            return round_number
 
     def load_json(self, raw: str, *, replace: bool = False) -> list[StudentProfile]:
         payload = json.loads(raw)
@@ -293,6 +328,9 @@ class StudentRegistry:
                 language=str(item.get("language", "English")),
                 voice=str(item["voice"]) if item.get("voice") else None,
                 initial_state=str(item.get("initial_state", "engaged")),
+                knowledge_level=str(item.get("knowledge_level", "intermediate")),
+                confidence=float(item.get("confidence", 0.6)),
+                willingness=float(item.get("willingness", 0.5)),
             )
             loaded.append(self.register(profile))
         return loaded

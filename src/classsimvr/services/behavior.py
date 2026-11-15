@@ -5,6 +5,7 @@ import os
 import re
 import unicodedata
 import time
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +14,8 @@ from pydantic import ValidationError
 from .contracts import BehaviorRequest, BehaviorResponse, TokenUsage
 from .gemini_client import create_gemini_client
 from .token_budget import TokenBudget
+
+logger = logging.getLogger(__name__)
 
 BEHAVIOR_INSTRUCTIONS = """You are a virtual learner in a Philippine classroom simulation.
 Respond only with a JSON object containing exactly these fields:
@@ -171,7 +174,129 @@ class BehaviorService:
         self.budget = budget or TokenBudget()
         self.max_retries = max(0, max_retries)
         self.fallback_responses = fallback_responses or {}
-        self._last_latency_ms: dict[str, float | None] = {"llm_generation": None}
+        self._last_latency_ms: dict[str, float | None] = {
+            "llm_generation": None,
+            "classroom_volunteer_decision": None,
+        }
+
+    def decide_classroom_volunteers(
+        self,
+        question: str,
+        students: list[Any],
+        *,
+        round_number: int = 0,
+    ) -> dict[str, str]:
+        """Make one validated, independent volunteer decision for every student."""
+        if not question.strip() or not students:
+            return {}
+        allowed = {student.student_id: student for student in students}
+        prompt = json.dumps({
+            "classroom_question": question.strip()[:4000],
+            "round_number": round_number,
+            "students": [
+                {
+                    "persona_id": student.student_id,
+                    "name": student.name,
+                    "personality": student.personality,
+                    "knowledge_level": student.knowledge_level,
+                    "confidence": student.confidence,
+                    "willingness": student.willingness,
+                }
+                for student in students
+            ],
+        }, ensure_ascii=False)
+        instruction = (
+            "You are evaluating classroom participation. For every listed student, make an "
+            "independent decision based on the question, knowledge_level, personality, "
+            "confidence, willingness, and round_number. Zero, one, or many may volunteer; "
+            "do not choose randomly and do not make everyone volunteer. Return only JSON with "
+            "decisions, one entry per listed persona_id. action must be exactly RAISE_HAND or "
+            "NONE. Volunteers remain seated and silent; do not generate dialogue."
+        )
+        started = time.perf_counter()
+        last_error: Exception | None = None
+        for _ in range(self.max_retries + 1):
+            try:
+                response = self._client().models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config={
+                        "system_instruction": instruction,
+                        "max_output_tokens": max(256, min(self.budget.max_output_tokens, 1024)),
+                        "response_mime_type": "application/json",
+                        "response_schema": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "decisions": {
+                                    "type": "ARRAY",
+                                    "items": {
+                                        "type": "OBJECT",
+                                        "properties": {
+                                            "persona_id": {"type": "STRING"},
+                                            "action": {"type": "STRING", "enum": ["RAISE_HAND", "NONE"]},
+                                        },
+                                        "required": ["persona_id", "action"],
+                                    },
+                                }
+                            },
+                            "required": ["decisions"],
+                        },
+                    },
+                )
+                parsed = json.loads(response.text)
+                decisions = parsed.get("decisions") if isinstance(parsed, dict) else None
+                if not isinstance(decisions, list):
+                    raise ValueError("classroom volunteer response did not contain decisions")
+                result = {student_id: "NONE" for student_id in allowed}
+                seen: set[str] = set()
+                for decision in decisions:
+                    if not isinstance(decision, dict):
+                        raise ValueError("invalid classroom volunteer decision entry")
+                    persona_id = decision.get("persona_id")
+                    action = decision.get("action")
+                    if persona_id not in allowed or persona_id in seen or action not in {"RAISE_HAND", "NONE"}:
+                        raise ValueError("invalid or duplicate classroom volunteer decision")
+                    seen.add(persona_id)
+                    result[persona_id] = action
+                self._last_latency_ms["classroom_volunteer_decision"] = round(
+                    (time.perf_counter() - started) * 1000, 2
+                )
+                return result
+            except Exception as error:
+                last_error = error
+                logger.warning("Classroom volunteer batch decision failed: %s", error)
+        self._last_latency_ms["classroom_volunteer_decision"] = round(
+            (time.perf_counter() - started) * 1000, 2
+        )
+        logger.warning("Using local classroom volunteer fallback after provider failure: %s", last_error)
+        return self._local_classroom_volunteer_decisions(students, round_number=round_number)
+
+    @staticmethod
+    def _local_classroom_volunteer_decisions(
+        students: list[Any], *, round_number: int = 0
+    ) -> dict[str, str]:
+        """Deterministic personality-aware fallback; rotation prevents a fixed volunteer set."""
+        knowledge = {"beginner": 0.35, "basic": 0.45, "intermediate": 0.65, "advanced": 0.85, "expert": 0.95}
+        result: dict[str, str] = {}
+        total = max(1, len(students))
+        for index, student in enumerate(students):
+            level = knowledge.get(str(student.knowledge_level).casefold(), 0.6)
+            rotation = (((round_number + index * 5) % total) / total) * 0.12
+            personality = str(student.personality).casefold()
+            personality_bias = 0.0
+            if any(word in personality for word in ("curious", "confident", "outgoing", "eager")):
+                personality_bias += 0.08
+            if any(word in personality for word in ("quiet", "shy", "reserved", "reluctant")):
+                personality_bias -= 0.08
+            score = (
+                0.40 * level
+                + 0.28 * float(student.confidence)
+                + 0.22 * float(student.willingness)
+                + personality_bias
+                + rotation
+            )
+            result[student.student_id] = "RAISE_HAND" if score >= 0.62 else "NONE"
+        return result
 
     def generate_reply(self, request: BehaviorRequest) -> BehaviorResponse:
         intent = classify_teacher_input(request.trainee_input)
