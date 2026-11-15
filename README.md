@@ -66,6 +66,10 @@ Use the trainee persona list endpoint to populate a student's available personas
 
 The endpoints use stable `/api/v1` paths, integer IDs, bounded JSON fields, and ordinary HTTP. Keep Unreal calls behind a small API adapter so a future WebSocket or voice transport can be added without changing gameplay code.
 
+## WebSocket transport
+
+The HTTP API remains available and unchanged. For real-time learner turns, Unreal may connect to `ws://127.0.0.1:8000/api/v1/ws/sessions/{session_id}`. The server sends a `connected` event first. Send `{"type":"ping"}` for a `pong`, or send a bounded `turn` message containing `persona_id` and `trainee_input`. Responses use `turn_response` with the existing behavior and optional TTS fields. Invalid messages and unassigned personas return an `error` event while keeping the connection open. Use the HTTP endpoints as the fallback after reconnect.
+
 ## Voice listening and VAD configuration
 
 The toggle-listen microphone service uses Silero VAD when `silero-vad` and its PyTorch runtime are installed. It combines Silero speech probability with an adaptive RMS noise floor. If Silero is unavailable or inference fails, it automatically falls back to adaptive RMS detection; the microphone API remains unchanged.

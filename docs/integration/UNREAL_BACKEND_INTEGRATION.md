@@ -255,6 +255,28 @@ Content-Type: application/json
 
 The backend resolves the persona and session runtime state from the IDs. Do not send persona profile fields from Unreal for this versioned route.
 
+## WebSocket real-time transport
+
+The HTTP API remains unchanged. Unreal may use the additive WebSocket endpoint for lower-overhead turn delivery:
+
+```text
+ws://{host}:{port}/api/v1/ws/sessions/{session_id}
+```
+
+The server sends `{"type":"connected","session_id":42}` after connection. Send `{"type":"ping"}` to receive `{"type":"pong"}`. Turn requests use:
+
+```json
+{
+  "type": "turn",
+  "persona_id": 7,
+  "trainee_input": "What is one half?",
+  "scene_state": "The class is reviewing fractions.",
+  "recent_turns": []
+}
+```
+
+Turn responses use `{"type":"turn_response","data":{...}}`, where `data` has the same behavior and optional TTS fields as the HTTP response. Invalid messages or unassigned personas return an `error` event while keeping the connection open. After a disconnect, reconnect and refresh session state over HTTP; HTTP remains the compatibility fallback.
+
 Response:
 
 ```json
