@@ -354,6 +354,22 @@ POST /api/v1/sessions/{session_id}/recording/complete
 
 The backend stores metadata and a storage reference. It does not expose local filesystem paths or API secrets. Production should replace the reference with a signed object-storage workflow.
 
+### Local development upload
+
+For local demonstrations, Unreal can upload the captured video directly after starting the recording:
+
+```http
+POST /api/v1/sessions/{session_id}/recording/upload
+Content-Type: multipart/form-data
+```
+
+Multipart fields:
+
+- `file`: the video file
+- `duration_s`: recording duration in seconds
+
+The backend saves the file below `CLASSSIMVR_RECORDING_DIR` (default: `storage/recordings`), records its relative storage reference, byte size, MIME type, and upload time, and changes the recording status to `completed`. There is currently no application-level file-size limit. The endpoint requires recording consent and an active recording created by the start endpoint. It is intended for local development only; production should use private object storage, signed upload URLs, and an explicit size limit.
+
 ## Assessment queue and polling
 
 After the session is completed and the recording is complete:

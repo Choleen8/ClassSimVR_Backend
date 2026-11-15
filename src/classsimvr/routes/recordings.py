@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session as DbSession
 
 from ..database import get_session
@@ -115,4 +115,24 @@ def complete_recording(
     except SessionNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except RecordingStateError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post(
+    "/sessions/{session_id}/recording/upload",
+    response_model=RecordingResponse,
+)
+async def upload_recording(
+    session_id: int,
+    duration_s: float = Form(..., gt=0, le=86_400),
+    file: UploadFile = File(...),
+    db: DbSession = Depends(get_session),
+    service: RecordingService = Depends(get_recording_service),
+) -> RecordingResponse:
+    try:
+        recording = await service.save_upload(db, session_id, file, duration_s)
+        return _recording_response(recording)
+    except SessionNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (ConsentRequiredError, RecordingStateError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
