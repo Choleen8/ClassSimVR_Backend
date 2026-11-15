@@ -13,6 +13,84 @@ def pcm_frame(value: float, count: int = 320) -> bytes:
     return struct.pack(f"<{count}f", *([value] * count))
 
 
+def test_adaptive_vad_does_not_keep_utterance_open_for_steady_background_noise():
+    detector = VoiceActivityDetector(
+        sample_rate=16_000,
+        frame_ms=20,
+        silence_ms=60,
+        threshold=0.015,
+        pre_roll_ms=0,
+        adaptive_noise=True,
+        noise_floor=0.02,
+        calibration_ms=0,
+        speech_start_multiplier=2.0,
+        speech_hold_multiplier=1.5,
+    )
+
+    assert detector.process(pcm_frame(0.05)) == []
+    emitted = []
+    for _ in range(4):
+        emitted.extend(detector.process(pcm_frame(0.02)))
+
+    assert emitted
+    assert not detector.speech_active
+
+
+def test_vad_supports_configurable_three_second_end_of_speech_pause():
+    detector = VoiceActivityDetector(
+        sample_rate=16_000,
+        frame_ms=20,
+        silence_ms=3000,
+        pre_roll_ms=0,
+        adaptive_noise=True,
+        noise_floor=0.001,
+    )
+
+    assert detector.process(pcm_frame(0.05)) == []
+    for _ in range(100):
+        assert detector.process(pcm_frame(0.0)) == []
+    assert detector.speech_active
+
+
+def test_silero_probability_can_reject_energy_only_background_speech():
+    class FakeSilero:
+        def speech_probability(self, audio_bytes, sample_rate):
+            return 0.1
+
+    detector = VoiceActivityDetector(
+        sample_rate=16_000,
+        frame_ms=20,
+        silence_ms=60,
+        pre_roll_ms=0,
+        adaptive_noise=True,
+        noise_floor=0.001,
+        silero=FakeSilero(),
+        silero_threshold=0.5,
+    )
+
+    for _ in range(4):
+        assert detector.process(pcm_frame(0.05)) == []
+    assert not detector.speech_active
+
+
+def test_idle_calibration_learns_loud_room_noise_before_classifying_speech():
+    detector = VoiceActivityDetector(
+        sample_rate=16_000,
+        frame_ms=20,
+        silence_ms=60,
+        threshold=0.015,
+        pre_roll_ms=0,
+        noise_floor=0.005,
+        calibration_ms=100,
+    )
+
+    for _ in range(5):
+        assert detector.process(pcm_frame(0.02)) == []
+
+    assert detector.noise_floor > 0.01
+    assert not detector.speech_active
+
+
 def test_vad_emits_one_utterance_after_speech_and_pause():
     detector = VoiceActivityDetector(
         sample_rate=16_000,
@@ -123,6 +201,9 @@ def test_listener_reports_audio_and_transcription_diagnostics():
     assert status["utterances_detected"] == 1
     assert status["utterances_transcribed"] == 1
     assert status["last_transcript"] == "Maria, please stand up"
+    assert status["vad"]["silence_ms"] == 40
+    assert "noise_floor" in status["vad"]
+    assert "provider" in status["vad"]
     assert results == ["Maria, please stand up"]
 
 

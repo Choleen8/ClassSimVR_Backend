@@ -66,6 +66,24 @@ Use the trainee persona list endpoint to populate a student's available personas
 
 The endpoints use stable `/api/v1` paths, integer IDs, bounded JSON fields, and ordinary HTTP. Keep Unreal calls behind a small API adapter so a future WebSocket or voice transport can be added without changing gameplay code.
 
+## Voice listening and VAD configuration
+
+The toggle-listen microphone service uses Silero VAD when `silero-vad` and its PyTorch runtime are installed. It combines Silero speech probability with an adaptive RMS noise floor. If Silero is unavailable or inference fails, it automatically falls back to adaptive RMS detection; the microphone API remains unchanged.
+
+Recommended starting configuration for Quest Link:
+
+```text
+MICROPHONE_VAD_SILENCE_MS=1500
+MICROPHONE_VAD_PROVIDER=silero
+MICROPHONE_VAD_THRESHOLD=0.015
+MICROPHONE_VAD_CALIBRATION_MS=1000
+MICROPHONE_VAD_START_MULTIPLIER=2.5
+MICROPHONE_VAD_HOLD_MULTIPLIER=1.5
+MICROPHONE_VAD_SILERO_THRESHOLD=0.5
+```
+
+Use `MICROPHONE_VAD_SILENCE_MS=3000` when the teacher needs longer pauses. `/microphone/status` reports the active provider, calibrated noise floor, thresholds, speech probability, VAD timing, Whisper timing, routing timing, LLM timing, TTS timing, queue timing, and total response timing. A single Quest microphone cannot perfectly separate the teacher from nearby speakers; Silero plus adaptive gating reduces ordinary interference, while headset positioning, lower room volume, and noise suppression in Windows/Quest Link remain important.
+
 ## Privacy and compliance
 
 The project includes a Philippine privacy/compliance baseline and a privacy-notice template in `docs/compliance/`. Consent now records its purpose and notice version, supports withdrawal, and prevents new recording after withdrawal. These are technical safeguards only; production use still requires the institution's DPO, privacy impact assessment, ethics approval, retention/deletion process, vendor review, security controls, and legal sign-off.

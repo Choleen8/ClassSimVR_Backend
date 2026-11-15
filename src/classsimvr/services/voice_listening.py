@@ -24,8 +24,58 @@ from .speech_to_text import SpeechToTextService
 logger = logging.getLogger(__name__)
 
 
+class SileroSpeechGate:
+    """Optional lazy Silero frame gate; unavailable environments use RMS."""
+
+    def __init__(self) -> None:
+        self.model = None
+        self.available = False
+        self._torch = None
+
+    def warmup(self) -> None:
+        if self.available:
+            return
+        try:
+            import torch
+            from silero_vad import load_silero_vad
+
+            self._torch = torch
+            self.model = load_silero_vad()
+            self.available = True
+            logger.info("Silero VAD loaded successfully")
+        except Exception as error:
+            self.model = None
+            self.available = False
+            logger.info("Silero VAD unavailable; using adaptive RMS fallback: %s", error)
+
+    def speech_probability(self, audio_bytes: bytes, sample_rate: int) -> float | None:
+        self.warmup()
+        if not self.available or self.model is None:
+            return None
+        try:
+            import numpy as np
+
+            samples = np.frombuffer(audio_bytes, dtype=np.float32)
+            if sample_rate != 16_000 and samples.size:
+                target_count = max(1, round(samples.size * 16_000 / sample_rate))
+                samples = np.interp(
+                    np.linspace(0, samples.size - 1, target_count),
+                    np.arange(samples.size),
+                    samples,
+                ).astype(np.float32)
+            if samples.size < 512:
+                samples = np.pad(samples, (0, 512 - samples.size))
+            tensor = self._torch.from_numpy(np.clip(samples[:512], -1.0, 1.0))
+            with self._torch.no_grad():
+                probability = self.model(tensor, 16_000)
+            return float(probability.item() if hasattr(probability, "item") else probability)
+        except Exception:
+            logger.debug("Silero VAD inference failed; using adaptive RMS fallback", exc_info=True)
+            return None
+
+
 class VoiceActivityDetector:
-    """Small RMS-based VAD suitable for push-to-listen classroom speech."""
+    """Hybrid speech detector with adaptive RMS fallback and optional Silero."""
 
     def __init__(
         self,
@@ -36,11 +86,41 @@ class VoiceActivityDetector:
         threshold: float | None = None,
         pre_roll_ms: int = 200,
         max_utterance_ms: int = 20_000,
+        adaptive_noise: bool = True,
+        noise_floor: float | None = None,
+        noise_floor_alpha: float | None = None,
+        calibration_ms: int | None = None,
+        speech_start_multiplier: float | None = None,
+        speech_hold_multiplier: float | None = None,
+        silero=None,
+        silero_threshold: float | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.frame_ms = frame_ms
-        self.silence_ms = silence_ms if silence_ms is not None else int(os.getenv("MICROPHONE_VAD_SILENCE_MS", "800"))
+        self.silence_ms = silence_ms if silence_ms is not None else int(os.getenv("MICROPHONE_VAD_SILENCE_MS", "1500"))
         self.threshold = threshold if threshold is not None else float(os.getenv("MICROPHONE_VAD_THRESHOLD", "0.015"))
+        self.adaptive_noise = adaptive_noise
+        self.noise_floor_alpha = noise_floor_alpha if noise_floor_alpha is not None else float(
+            os.getenv("MICROPHONE_VAD_NOISE_FLOOR_ALPHA", "0.05")
+        )
+        self.calibration_ms = calibration_ms if calibration_ms is not None else int(
+            os.getenv("MICROPHONE_VAD_CALIBRATION_MS", "1000")
+        )
+        self._calibration_frames_remaining = max(0, self.calibration_ms // self.frame_ms)
+        self.noise_floor = noise_floor if noise_floor is not None else float(
+            os.getenv("MICROPHONE_VAD_NOISE_FLOOR", str(self.threshold / 3.0))
+        )
+        self.speech_start_multiplier = speech_start_multiplier if speech_start_multiplier is not None else float(
+            os.getenv("MICROPHONE_VAD_START_MULTIPLIER", "2.5")
+        )
+        self.speech_hold_multiplier = speech_hold_multiplier if speech_hold_multiplier is not None else float(
+            os.getenv("MICROPHONE_VAD_HOLD_MULTIPLIER", "1.5")
+        )
+        self.silero_threshold = silero_threshold if silero_threshold is not None else float(
+            os.getenv("MICROPHONE_VAD_SILERO_THRESHOLD", "0.5")
+        )
+        self.silero = silero if silero is not None else self._default_silero()
+        self.last_silero_probability: float | None = None
         self._pre_roll = deque(maxlen=max(1, pre_roll_ms // frame_ms))
         self._max_utterance_ms = max_utterance_ms
         self._current: list[bytes] = []
@@ -49,6 +129,7 @@ class VoiceActivityDetector:
         self._speech_active = False
         self.last_rms = 0.0
         self.last_peak = 0.0
+        self.last_speech_detected = False
 
     def process(self, audio_bytes: bytes) -> list[bytes]:
         if not audio_bytes:
@@ -57,7 +138,11 @@ class VoiceActivityDetector:
         if duration_ms <= 0:
             return []
         self.last_rms, self.last_peak = self._levels(audio_bytes)
-        speaking = self.last_rms >= self.threshold
+        if not self._current and self._calibration_frames_remaining > 0:
+            self._adapt_noise_floor(self.last_rms, alpha=max(self.noise_floor_alpha, 0.25))
+            self._calibration_frames_remaining -= 1
+        speaking = self._speech_detected(audio_bytes, active=bool(self._current))
+        self.last_speech_detected = speaking
         emitted: list[bytes] = []
         if not self._current and speaking:
             self._speech_active = True
@@ -75,6 +160,7 @@ class VoiceActivityDetector:
                 emitted.append(b"".join(self._current))
                 self.reset()
         else:
+            self._update_noise_floor(self.last_rms)
             self._pre_roll.append(audio_bytes)
         return emitted
 
@@ -91,6 +177,8 @@ class VoiceActivityDetector:
         self._silence_ms = 0
         self._pre_roll.clear()
         self._speech_active = False
+        self.last_silero_probability = None
+        self.last_speech_detected = False
 
     @property
     def speech_active(self) -> bool:
@@ -99,6 +187,86 @@ class VoiceActivityDetector:
     def _duration_ms(self, audio_bytes: bytes) -> int:
         sample_count = len(audio_bytes) // 4
         return int(sample_count * 1_000 / self.sample_rate)
+
+    def warmup(self) -> None:
+        warmup = getattr(self.silero, "warmup", None)
+        if callable(warmup):
+            warmup()
+
+    def begin_calibration(self) -> None:
+        self._calibration_frames_remaining = max(0, self.calibration_ms // self.frame_ms)
+
+    def diagnostics(self) -> dict:
+        return {
+            "provider": "silero" if self._silero_available() else "adaptive_rms",
+            "adaptive_noise": self.adaptive_noise,
+            "noise_floor": round(self.noise_floor, 6),
+            "start_threshold": round(self._start_threshold(), 6),
+            "hold_threshold": round(self._hold_threshold(), 6),
+            "silero_threshold": self.silero_threshold,
+            "silero_probability": self.last_silero_probability,
+            "silero_available": self._silero_available(),
+            "silence_ms": self.silence_ms,
+            "calibration_frames_remaining": self._calibration_frames_remaining,
+        }
+
+    @staticmethod
+    def _default_silero():
+        if os.getenv("MICROPHONE_VAD_PROVIDER", "silero").strip().casefold() in {
+            "rms", "adaptive_rms", "off", "none"
+        }:
+            return None
+        try:
+            return SileroSpeechGate()
+        except Exception:
+            return None
+
+    def _silero_available(self) -> bool:
+        return self.silero is not None and bool(getattr(self.silero, "available", True))
+
+    def _start_threshold(self) -> float:
+        if not self.adaptive_noise:
+            return self.threshold
+        return max(self.threshold, self.noise_floor * self.speech_start_multiplier)
+
+    def _hold_threshold(self) -> float:
+        if not self.adaptive_noise:
+            return self.threshold
+        return max(self.threshold, self.noise_floor * self.speech_hold_multiplier)
+
+    def _update_noise_floor(self, rms: float) -> None:
+        if not self.adaptive_noise or rms > self._start_threshold():
+            return
+        self._adapt_noise_floor(rms)
+
+    def _adapt_noise_floor(self, rms: float, *, alpha: float | None = None) -> None:
+        if not self.adaptive_noise:
+            return
+        update_alpha = min(1.0, max(0.001, alpha or self.noise_floor_alpha))
+        self.noise_floor = (1.0 - update_alpha) * self.noise_floor + update_alpha * rms
+
+    def _speech_detected(self, audio_bytes: bytes, *, active: bool) -> bool:
+        rms_threshold = self._hold_threshold() if active else self._start_threshold()
+        energy_speech = self.last_rms >= rms_threshold
+        if not energy_speech:
+            self.last_silero_probability = None
+            return False
+        if self.silero is None:
+            return True
+        probability_fn = getattr(self.silero, "speech_probability", None)
+        if not callable(probability_fn):
+            return True
+        try:
+            probability = probability_fn(audio_bytes, self.sample_rate)
+        except Exception:
+            logger.debug("Silero VAD frame failed; using adaptive RMS fallback", exc_info=True)
+            self.last_silero_probability = None
+            return True
+        if probability is None:
+            self.last_silero_probability = None
+            return True
+        self.last_silero_probability = round(float(probability), 4)
+        return float(probability) >= self.silero_threshold
 
     @staticmethod
     def _rms(audio_bytes: bytes) -> float:
@@ -174,6 +342,13 @@ class VoiceListeningService:
                 raise MicrophoneBusyError("microphone listening is already enabled")
             self._clear_queue()
             self._vad.reset()
+            begin_calibration = getattr(self._vad, "begin_calibration", None)
+            if callable(begin_calibration):
+                begin_calibration()
+            try:
+                self._vad.warmup()
+            except Exception as error:
+                logger.warning("Silero VAD warmup failed; adaptive RMS fallback will be used: %s", error)
             warmup = getattr(self._transcriber, "warmup", None)
             if callable(warmup):
                 try:
@@ -327,6 +502,7 @@ class VoiceListeningService:
                 "vad_threshold": self._vad.threshold,
                 "vad_silence_ms": self._vad.silence_ms,
                 "vad_speech_active": self._vad.speech_active,
+                "vad": self._vad.diagnostics(),
                 "speech_started": self._speech_started,
                 "speech_ended": self._speech_ended,
                 "utterances_detected": self._utterances_detected,
@@ -359,14 +535,15 @@ class VoiceListeningService:
         with self._lock:
             self._last_rms = rms
             self._peak_volume = max(self._peak_volume, peak)
-            if rms >= self._vad.threshold:
+            if rms >= self._vad._hold_threshold():
                 self._non_silent_frames += 1
-                self._last_non_silent_at = time.perf_counter()
             was_active = self._vad.speech_active
         vad_started = time.perf_counter()
         utterances = self._vad.process(audio_bytes)
         self._last_vad_ms = round((time.perf_counter() - vad_started) * 1000, 2)
         with self._lock:
+            if self._vad.last_speech_detected:
+                self._last_non_silent_at = time.perf_counter()
             is_active = self._vad.speech_active
             if not was_active and is_active:
                 self._speech_started += 1

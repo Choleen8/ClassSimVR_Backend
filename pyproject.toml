@@ -19,6 +19,7 @@ dependencies = [
     "sounddevice",
     "numpy",
     "faster-whisper",
+    "silero-vad",
 ]
 
 [project.scripts]

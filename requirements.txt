@@ -16,3 +16,4 @@ sounddevice
 numpy
 faster-whisper
 av>=11,<19
+silero-vad
