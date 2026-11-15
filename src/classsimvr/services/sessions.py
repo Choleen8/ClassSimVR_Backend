@@ -72,6 +72,17 @@ class SessionService:
             raise SessionNotFoundError(f"session {session_id} was not found")
         return session
 
+    def list_history(self, db: DbSession, trainee_id: int) -> list[Session]:
+        if db.get(Trainee, trainee_id) is None:
+            raise TraineeNotFoundError(f"trainee {trainee_id} was not found")
+        return list(
+            db.scalars(
+                select(Session)
+                .where(Session.trainee_id == trainee_id)
+                .order_by(Session.created_at.desc(), Session.session_id.desc())
+            ).all()
+        )
+
     def _transition(
         self,
         db: DbSession,

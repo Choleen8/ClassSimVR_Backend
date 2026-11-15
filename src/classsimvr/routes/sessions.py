@@ -11,6 +11,7 @@ from ..services.session_contracts import (
     SessionLifecycleResponse,
     SessionResponse,
     StudentGenerationRequest,
+    TraineeHistoryResponse,
 )
 from ..services.sessions import (
     ClassAlreadyGeneratedError,
@@ -51,6 +52,43 @@ def create_session(
         return _session_response(service.create_session(db, data))
     except TraineeNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+def _history_response(session) -> TraineeHistoryResponse:
+    report = session.report
+    return TraineeHistoryResponse(
+        session_id=session.session_id,
+        trainee_id=session.trainee_id,
+        grade=session.grade,
+        competency=session.competency,
+        class_size=session.class_size,
+        difficulty=session.difficulty,
+        status=session.status,
+        assessment_status=session.assessment_status,
+        assessment_message=session.assessment_message,
+        created_at=session.created_at,
+        started_at=session.started_at,
+        completed_at=session.completed_at,
+        report_available=report is not None,
+        summary=report.summary if report is not None else None,
+        next_focus=report.next_focus if report is not None else None,
+    )
+
+
+@router.get(
+    "/trainees/{trainee_id}/history",
+    response_model=list[TraineeHistoryResponse],
+)
+def get_trainee_history(
+    trainee_id: int,
+    db: DbSession = Depends(get_session),
+    service: SessionService = Depends(get_session_service),
+) -> list[TraineeHistoryResponse]:
+    try:
+        sessions = service.list_history(db, trainee_id)
+    except TraineeNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return [_history_response(session) for session in sessions]
 
 
 def _student_response(assignment) -> AssignedPersonaResponse:
