@@ -74,6 +74,10 @@ class MicrophoneCommandRouter:
         default_persona_id: str = "maria-sandoval",
     ) -> CommandResult:
         pipeline_started = time.perf_counter()
+        lifecycle_responses = self._lower_hand_responses(
+            session_id,
+            self.registry.expire_hand_raises(session_id),
+        )
         command_started = time.perf_counter()
         intent = classify_teacher_input(transcript)
         self._last_latency_ms["command_recognition"] = round(
@@ -81,11 +85,27 @@ class MicrophoneCommandRouter:
         )
         routing_started = time.perf_counter()
         if self._is_autonomous_hand_raise_request(transcript):
-            result = self._handle_classroom_invitation(session_id)
+            lowered = self._lower_hand_responses(
+                session_id,
+                self.registry.lower_raised_hands(session_id, reason="new_invitation"),
+            )
+            result = self._handle_classroom_invitation(session_id, invitation_text=transcript)
+            result = CommandResult(
+                target=result.target,
+                responses=lifecycle_responses + lowered + result.responses,
+            )
             self._last_latency_ms["total_response"] = round(
                 (time.perf_counter() - pipeline_started) * 1000, 2
             )
             return result
+        # A teacher may invite volunteers, but cannot directly force a student
+        # to raise a hand. Treat direct raise-hand wording as a no-op.
+        if self._is_direct_raise_hand_command(transcript):
+            logger.info("Ignored direct raise-hand command transcript=%r", transcript)
+            return CommandResult(
+                target="classroom" if lifecycle_responses else "none",
+                responses=lifecycle_responses,
+            )
         intent = classify_teacher_input(transcript)
         target_students = self._targets(transcript, default_persona_id)
         self._last_latency_ms["student_routing"] = round(
@@ -93,13 +113,22 @@ class MicrophoneCommandRouter:
         )
         if intent.speak:
             self.registry.record_classroom_question(session_id, transcript)
-        responses: list[BehaviorResponse] = []
+        responses: list[BehaviorResponse] = list(lifecycle_responses)
         classroom_wide = self._is_classroom_wide(transcript)
         if not target_students:
+            if intent.speak:
+                responses.extend(self._lower_hand_responses(
+                    session_id,
+                    self.registry.lower_raised_hands(session_id, reason="question_ended"),
+                ))
             self._last_latency_ms["total_response"] = round(
                 (time.perf_counter() - pipeline_started) * 1000, 2
             )
-            return CommandResult(target="none", responses=[])
+            return CommandResult(target="classroom" if responses else "none", responses=responses)
+        responses.extend(self._lower_hand_responses(
+            session_id,
+            self.registry.lower_raised_hands(session_id, reason="student_selected"),
+        ))
         memory_ms = 0.0
         tts_ms = 0.0
         for student in target_students:
@@ -174,9 +203,9 @@ class MicrophoneCommandRouter:
         target = "classroom" if len(target_students) > 1 else target_students[0].student_id
         return CommandResult(target=target, responses=responses)
 
-    def _handle_classroom_invitation(self, session_id: str) -> CommandResult:
+    def _handle_classroom_invitation(self, session_id: str, *, invitation_text: str = "") -> CommandResult:
         """Ask the behavior service for one independent decision per registered student."""
-        question = self.registry.get_classroom_question(session_id)
+        question = self.registry.get_classroom_question(session_id) or invitation_text.strip()
         students = self.registry.list_students()
         if not question or not students:
             logger.info("Classroom invitation ignored because no latest question is available")
@@ -198,27 +227,51 @@ class MicrophoneCommandRouter:
                 logger.warning("Rejected invalid volunteer decision student=%s action=%s", student.student_id, action)
                 continue
             if action == "RAISE_HAND":
-                self.registry.update_session_state(
-                    session_id,
-                    student.student_id,
-                    data={"last_action": "RAISE_HAND", "hand_raised": True, "volunteer_round": round_number},
-                )
-                responses.append(BehaviorResponse(
-                    persona_id=student.student_id,
-                    dialogue="",
-                    emotion="eager",
-                    action="RAISE_HAND",
-                    speak=False,
-                    audio_url=None,
-                    fallback=False,
-                ))
+                if self.registry.mark_hand_raised(
+                    session_id, student.student_id, round_number=round_number
+                ):
+                    responses.append(BehaviorResponse(
+                        persona_id=student.student_id,
+                        dialogue="",
+                        emotion="eager",
+                        action="RAISE_HAND",
+                        speak=False,
+                        audio_url=None,
+                        fallback=False,
+                    ))
         latency = getattr(self.behavior, "latency_status", lambda: {})().get("classroom_volunteer_decision")
         if latency is not None:
             self._last_latency_ms["classroom_volunteer_decision"] = latency
         return CommandResult(target="classroom", responses=responses)
 
+    def _lower_hand_responses(self, session_id: str, student_ids: list[str]) -> list[BehaviorResponse]:
+        responses: list[BehaviorResponse] = []
+        for student_id in student_ids:
+            try:
+                self.registry.get(student_id)
+            except Exception:
+                logger.warning("Skipping LOWER_HAND for unregistered student=%s", student_id)
+                continue
+            responses.append(BehaviorResponse(
+                persona_id=student_id,
+                dialogue="",
+                emotion="neutral",
+                action="LOWER_HAND",
+                speak=False,
+                audio_url=None,
+                fallback=False,
+            ))
+        return responses
+
     def latency_status(self) -> dict:
         return dict(self._last_latency_ms)
+
+    def expire_hand_raise_responses(self, session_id: str) -> list[BehaviorResponse]:
+        """Build silent LOWER_HAND responses for hands that timed out."""
+        return self._lower_hand_responses(
+            session_id,
+            self.registry.expire_hand_raises(session_id),
+        )
 
     def _targets(self, transcript: str, default_persona_id: str) -> list[StudentRoute]:
         text = transcript.casefold()
@@ -284,6 +337,16 @@ class MicrophoneCommandRouter:
             "anyone gustong sumagot",
         )
         return any(phrase in normalized for phrase in phrases)
+
+    @staticmethod
+    def _is_direct_raise_hand_command(text: str) -> bool:
+        normalized = MicrophoneCommandRouter._normalized_address_text(text)
+        phrases = (
+            "raise your hand", "raise hand", "put your hand up", "taas kamay",
+            "taas ang kamay", "itaas ang kamay", "itaas mo ang kamay",
+            "itaas ang iyong kamay", "taas ang kamay mo",
+        )
+        return any(re.search(rf"\b{re.escape(phrase)}\b", normalized) for phrase in phrases)
 
     @staticmethod
     def _normalized_address_text(transcript: str) -> str:

@@ -167,8 +167,17 @@ class ListeningCoordinator:
         return status
 
     def poll(self, session_id: str, *, limit: int, drain: bool) -> list[MicrophoneStopResponse]:
+        expire_hands = getattr(self.router, "expire_hand_raise_responses", None)
+        expired_hand_responses = expire_hands(session_id) if expire_hands else []
         with self._lock:
             response_queue = self._queues[session_id]
+            if expired_hand_responses:
+                response_queue.append(MicrophoneStopResponse(
+                    transcript="",
+                    target="classroom",
+                    responses=expired_hand_responses,
+                ))
+                self._queue_enqueued_at[session_id].append(time.perf_counter())
             if drain:
                 items = []
                 for _ in range(min(limit, len(response_queue))):

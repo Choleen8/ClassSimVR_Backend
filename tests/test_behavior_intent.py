@@ -6,7 +6,7 @@ def test_physical_commands_do_not_request_speech():
         "Please stand up": "STAND",
         "Stand up": "STAND",
         "Please sit down": "SIT",
-        "Raise your hand": "RAISE_HAND",
+        "Raise your hand": "NONE",
         "Put your hand down": "LOWER_HAND",
     }
 
@@ -54,9 +54,9 @@ def test_natural_english_tagalog_and_taglish_posture_requests_stay_silent():
 
 def test_tagalog_hand_commands_are_recognized_as_physical_only():
     cases = {
-        "Maria, itaas mo ang kamay mo": "RAISE_HAND",
-        "Itaas ang kamay, Maria": "RAISE_HAND",
-        "Maria, taas kamay": "RAISE_HAND",
+        "Maria, itaas mo ang kamay mo": "NONE",
+        "Itaas ang kamay, Maria": "NONE",
+        "Maria, taas kamay": "NONE",
         "Ibagsak ang kamay mo, Maria": "LOWER_HAND",
         "Maria, ibaba ang kamay": "LOWER_HAND",
     }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from threading import RLock
@@ -105,6 +106,7 @@ class StudentRegistry:
     """Thread-safe runtime registry for dynamic learner profiles and state."""
 
     _CONVERSATION_HISTORY_LIMIT = 12
+    HAND_RAISE_TIMEOUT_SECONDS = 10.0
 
     def __init__(self, profiles: tuple[StudentProfile, ...] = ()) -> None:
         self._lock = RLock()
@@ -296,6 +298,71 @@ class StudentRegistry:
             round_number = self._volunteer_rounds.get(key, 0) + 1
             self._volunteer_rounds[key] = round_number
             return round_number
+
+    def mark_hand_raised(self, session_id: str, student_id: str, *, round_number: int) -> bool:
+        """Mark one student as waiting with a timestamp; return False if already raised."""
+        state = self.get_session_state(session_id, student_id)
+        with self._lock:
+            if state.data.get("hand_raised"):
+                return False
+            state.data.update({
+                "hand_raised": True,
+                "hand_raised_at": time.monotonic(),
+                "last_action": "RAISE_HAND",
+                "volunteer_round": round_number,
+            })
+            return True
+
+    def lower_raised_hands(
+        self,
+        session_id: str,
+        *,
+        keep_student_id: str | None = None,
+        reason: str = "lifecycle",
+    ) -> list[str]:
+        """Lower all raised hands except an optional selected student."""
+        keep = _canonical_student_id(keep_student_id) if keep_student_id else None
+        lowered: list[str] = []
+        with self._lock:
+            session_states = self._states.get(str(session_id), {})
+            for student_id, state in session_states.items():
+                if student_id == keep or not state.data.get("hand_raised"):
+                    continue
+                state.data.update({
+                    "hand_raised": False,
+                    "hand_raised_at": None,
+                    "last_action": "LOWER_HAND",
+                    "hand_lowered_reason": reason,
+                })
+                lowered.append(student_id)
+        return lowered
+
+    def expire_hand_raises(
+        self,
+        session_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> list[str]:
+        """Lower hands that have waited beyond the configured timeout."""
+        timeout = self.HAND_RAISE_TIMEOUT_SECONDS if timeout_seconds is None else max(0.0, timeout_seconds)
+        now = time.monotonic()
+        expired: list[str] = []
+        with self._lock:
+            session_states = self._states.get(str(session_id), {})
+            for student_id, state in session_states.items():
+                raised_at = state.data.get("hand_raised_at")
+                if not state.data.get("hand_raised") or not isinstance(raised_at, (int, float)):
+                    continue
+                if now - float(raised_at) < timeout:
+                    continue
+                state.data.update({
+                    "hand_raised": False,
+                    "hand_raised_at": None,
+                    "last_action": "LOWER_HAND",
+                    "hand_lowered_reason": "timeout",
+                })
+                expired.append(student_id)
+        return expired
 
     def load_json(self, raw: str, *, replace: bool = False) -> list[StudentProfile]:
         payload = json.loads(raw)

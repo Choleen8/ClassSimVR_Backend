@@ -50,11 +50,6 @@ class TeacherIntent:
 
 
 _COMMAND_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("RAISE_HAND", (
-        "raise your hand", "raise hand", "put your hand up",
-        "taas kamay", "taas ang kamay", "itaas ang kamay",
-        "itaas mo ang kamay", "itaas ang iyong kamay", "taas ang kamay mo",
-    )),
     ("LOWER_HAND", (
         "lower your hand", "lower hand", "put your hand down", "hands down",
         "ibaba ang kamay", "ibaba mo ang kamay", "ibaba ang iyong kamay",

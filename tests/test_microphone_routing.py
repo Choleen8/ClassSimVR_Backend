@@ -409,4 +409,97 @@ def test_semantic_taglish_invitation_routes_latest_question_to_batch_decider():
     assert result.target == "classroom"
     assert [response.persona_id for response in result.responses] == ["maria-sandoval"]
     assert result.responses[0].action == "RAISE_HAND"
+
+
+def test_invitation_without_prior_question_still_runs_autonomous_decision():
+    registry = StudentRegistry()
+    registry.register(StudentProfile(
+        student_id="maria-sandoval", name="Maria Sandoval", aliases=("maria",),
+    ))
+
+    class VolunteerBehavior(FakeBehavior):
+        def decide_classroom_volunteers(self, question, students, *, round_number=0):
+            assert question == "Who wants to answer?"
+            return {"maria-sandoval": "RAISE_HAND"}
+
+    router = MicrophoneCommandRouter(
+        behavior=VolunteerBehavior(), tts=FakeTTS(), registry=registry
+    )
+    result = router.handle("Who wants to answer?", session_id="classroom")
+
+    assert result.target == "classroom"
+    assert [(item.persona_id, item.action) for item in result.responses] == [
+        ("maria-sandoval", "RAISE_HAND")
+    ]
+    assert result.responses[0].speak is False
+    assert registry.get_session_state("classroom", "maria-sandoval").data["hand_raised"] is True
+
+
+def test_direct_raise_hand_command_is_ignored():
+    behavior = FakeBehavior()
+    router = MicrophoneCommandRouter(behavior=behavior, tts=FakeTTS())
+
+    result = router.handle("Raise your hand", session_id="classroom")
+
+    assert result.target == "none"
+    assert result.responses == []
+    assert behavior.inputs == []
+
+
+def test_new_question_lowers_waiting_hands_without_speech():
+    registry = StudentRegistry()
+    registry.register(StudentProfile(
+        student_id="maria-sandoval", name="Maria Sandoval", aliases=("maria",),
+    ))
+    behavior = FakeBehavior()
+    router = MicrophoneCommandRouter(behavior=behavior, tts=FakeTTS(), registry=registry)
+    registry.mark_hand_raised("classroom", "maria-sandoval", round_number=1)
+
+    result = router.handle("What is a computer?", session_id="classroom")
+
+    assert [(item.persona_id, item.action) for item in result.responses] == [
+        ("maria-sandoval", "LOWER_HAND")
+    ]
+    assert result.responses[0].speak is False
+    assert registry.get_session_state("classroom", "maria-sandoval").data["hand_raised"] is False
+
+
+def test_selecting_student_lowers_all_waiting_hands_before_response():
+    registry = StudentRegistry()
+    registry.register(StudentProfile(
+        student_id="maria-sandoval", name="Maria Sandoval", aliases=("maria",),
+    ))
+    registry.register(StudentProfile(
+        student_id="robert-eco", name="Robert Eco", aliases=("robert",),
+    ))
+    registry.mark_hand_raised("classroom", "maria-sandoval", round_number=1)
+    registry.mark_hand_raised("classroom", "robert-eco", round_number=1)
+    router = MicrophoneCommandRouter(behavior=FakeBehavior(), tts=FakeTTS(), registry=registry)
+
+    result = router.handle("Maria, what is a computer?", session_id="classroom")
+
+    assert [(item.persona_id, item.action) for item in result.responses[:2]] == [
+        ("maria-sandoval", "LOWER_HAND"),
+        ("robert-eco", "LOWER_HAND"),
+    ]
+    assert result.responses[-1].persona_id == "maria-sandoval"
+    assert registry.get_session_state("classroom", "maria-sandoval").data["hand_raised"] is False
+    assert registry.get_session_state("classroom", "robert-eco").data["hand_raised"] is False
+
+
+def test_expired_waiting_hand_emits_lower_hand_on_next_event():
+    registry = StudentRegistry()
+    registry.register(StudentProfile(
+        student_id="maria-sandoval", name="Maria Sandoval", aliases=("maria",),
+    ))
+    registry.mark_hand_raised("classroom", "maria-sandoval", round_number=1)
+    state = registry.get_session_state("classroom", "maria-sandoval")
+    state.data["hand_raised_at"] -= 11.0
+    router = MicrophoneCommandRouter(behavior=FakeBehavior(), tts=FakeTTS(), registry=registry)
+
+    result = router.handle("Hello", session_id="classroom")
+
+    assert [(item.persona_id, item.action) for item in result.responses] == [
+        ("maria-sandoval", "LOWER_HAND")
+    ]
     assert result.responses[0].speak is False
