@@ -112,6 +112,7 @@ Assessment output should use these standards as structured data, not as unvalida
 - Persona service layer with creation, global listing, trainee-level aggregation, session assignment, session listing, and runtime-state updates.
 - Versioned API health, persona, trainee-persona, session-persona, and behavior routes under `/api/v1`.
 - Session lifecycle routes for start, pause, resume, complete, and reset.
+- Trainee session-history route returning newest-first session summaries and available report summaries.
 - Deterministic local generation of 15–30 session-only students with automatic assignment and reset cleanup.
 - Consent and recording metadata/intake routes with a required-consent guard.
 - Consent purpose/notice-version tracking, withdrawal, and a guard that blocks new recording after withdrawal.
@@ -177,6 +178,7 @@ POST   /api/v1/sessions/{session_id}/reset
 POST   /api/v1/personas
 GET    /api/v1/personas
 GET    /api/v1/trainees/{trainee_id}/personas
+GET    /api/v1/trainees/{trainee_id}/history
 POST   /api/v1/sessions/{session_id}/personas
 GET    /api/v1/sessions/{session_id}/personas
 PATCH  /api/v1/sessions/{session_id}/personas/{persona_id}

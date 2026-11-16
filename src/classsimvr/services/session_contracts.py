@@ -39,6 +39,24 @@ class SessionResponse(BaseModel):
     created_at: datetime
 
 
+class TraineeHistoryResponse(BaseModel):
+    session_id: int
+    trainee_id: int
+    grade: str | None
+    competency: str | None
+    class_size: int | None
+    difficulty: str | None
+    status: str
+    assessment_status: str
+    assessment_message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    report_available: bool
+    summary: str | None
+    next_focus: str | None
+
+
 class GeneratedClassResponse(BaseModel):
     session_id: int
     class_size: int

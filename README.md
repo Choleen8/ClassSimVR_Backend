@@ -43,6 +43,7 @@ PUT  /api/v1/sessions/{session_id}/consent
 DELETE /api/v1/sessions/{session_id}/consent
 POST /api/v1/sessions/{session_id}/recording/start
 POST /api/v1/sessions/{session_id}/recording/complete
+POST /api/v1/sessions/{session_id}/recording/upload
 GET  /api/v1/assessment/rubric
 POST /api/v1/sessions/{session_id}/assessment
 GET  /api/v1/assessment/jobs/{job_id}

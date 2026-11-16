@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "fastapi",
+    "python-multipart",
     "httpx",
     "google-genai",
     "psycopg[binary]",

@@ -98,3 +98,40 @@ def test_consent_can_be_withdrawn_and_blocks_new_recording(client):
     assert withdrawn.status_code == 200
     assert withdrawn.json()["video_recording"] is False
     assert start.status_code == 409
+
+
+def test_recording_upload_saves_video_bytes_and_completes_recording(client, tmp_path, monkeypatch):
+    http, session_id = client
+    monkeypatch.setenv("CLASSSIMVR_RECORDING_DIR", str(tmp_path))
+
+    consent = http.put(
+        f"/api/v1/sessions/{session_id}/consent",
+        json={
+            "video_recording": True,
+            "purpose": "Research assessment.",
+            "notice_version": "2026-11-09",
+        },
+    )
+    started = http.post(
+        f"/api/v1/sessions/{session_id}/recording/start",
+        json={"mime_type": "video/webm", "storage_ref": "pending"},
+    )
+
+    video_bytes = b"fake-webm-video-for-upload-test"
+    uploaded = http.post(
+        f"/api/v1/sessions/{session_id}/recording/upload",
+        files={"file": ("lesson.webm", video_bytes, "video/webm")},
+        data={"duration_s": "12.5"},
+    )
+
+    assert consent.status_code == 200
+    assert started.status_code == 201
+    assert uploaded.status_code == 200
+    body = uploaded.json()
+    assert body["status"] == "completed"
+    assert body["mime_type"] == "video/webm"
+    assert body["duration_s"] == 12.5
+    assert body["size_bytes"] == len(video_bytes)
+    saved_file = tmp_path / body["storage_ref"]
+    assert saved_file.is_file()
+    assert saved_file.read_bytes() == video_bytes
