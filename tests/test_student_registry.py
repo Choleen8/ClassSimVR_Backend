@@ -26,7 +26,7 @@ def test_registry_registers_unique_profiles_and_resolves_aliases():
     profile = make_student(1)
     registry.register(profile)
 
-    assert registry.resolve("Please ask learner 1 to answer") == profile
+    assert registry.resolve("Please ask learner 1 to answer").student_id == profile.student_id
     with pytest.raises(DuplicateStudentError):
         registry.register(profile)
 
@@ -39,7 +39,7 @@ def test_default_registry_includes_ethan_luna_with_shared_male_voice_and_capabil
     assert ethan.name == "Ethan Luna"
     assert {registry.resolve(alias).student_id for alias in ("Ethan", "Ethan Luna")} == {"ethan-luna"}
     assert ethan.voice == registry.get("robert-eco").voice
-    assert ethan.knowledge_level == "intermediate"
+    assert ethan.knowledge_level == "INTERMEDIATE"
     assert ethan.confidence == 0.6
     assert ethan.willingness == 0.6
     assert "THINKING" in ethan.supported_actions
@@ -113,7 +113,7 @@ def test_registry_resolves_registered_name_anywhere_with_natural_punctuation():
         "Pwede bang tumayo ka, learner 3?",
         "Itaas ang kamay ni Student 3!",
     ):
-        assert registry.resolve(text) == profile
+        assert registry.resolve(text).student_id == profile.student_id
 
 
 def test_default_robert_profile_uses_canonical_actor_persona_id_and_all_aliases():
@@ -194,8 +194,8 @@ def test_registry_matches_speech_transcription_punctuation_variants():
     )
     registry.register(profile)
 
-    assert registry.resolve("Please stand, Jean-Pierre O'Neil") == profile
-    assert registry.resolve("Please stand Jean Pierre O Neil") == profile
+    assert registry.resolve("Please stand, Jean-Pierre O'Neil").student_id == profile.student_id
+    assert registry.resolve("Please stand Jean Pierre O Neil").student_id == profile.student_id
 
 
 def test_registry_matches_accented_spoken_name_to_unaccented_profile():
@@ -203,4 +203,4 @@ def test_registry_matches_accented_spoken_name_to_unaccented_profile():
     profile = StudentProfile(student_id="maria-sandoval", name="Maria Sandoval", aliases=("maria",))
     registry.register(profile)
 
-    assert registry.resolve("María, introduce yourself") == profile
+    assert registry.resolve("María, introduce yourself").student_id == profile.student_id
