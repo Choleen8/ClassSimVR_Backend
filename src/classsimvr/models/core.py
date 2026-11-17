@@ -19,6 +19,10 @@ class Trainee(Base):
         "Session",
         back_populates="trainee", cascade="all, delete-orphan"
     )
+    auth_account: Mapped["AuthAccount | None"] = relationship(
+        "AuthAccount", back_populates="trainee", uselist=False,
+        cascade="all, delete-orphan"
+    )
 
 
 class Session(Base):

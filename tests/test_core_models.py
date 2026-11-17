@@ -21,7 +21,9 @@ def test_session_references_trainee_and_exposes_relationship_collections():
     assert "trainee_id" in session_columns
     foreign_keys = {foreign_key.target_fullname for foreign_key in inspect(Session).columns.trainee_id.foreign_keys}
     assert foreign_keys == {"trainee.trainee_id"}
-    assert {relationship.key for relationship in inspect(Trainee).relationships} == {"sessions"}
+    assert {relationship.key for relationship in inspect(Trainee).relationships} == {
+        "sessions", "auth_account"
+    }
     assert {relationship.key for relationship in inspect(Session).relationships} >= {"trainee"}
 
 
