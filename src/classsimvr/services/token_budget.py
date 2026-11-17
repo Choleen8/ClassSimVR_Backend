@@ -67,13 +67,22 @@ class TokenBudget:
         scene_state: str,
         session_summary: str,
         recent_turns: list[dict[str, str]],
+        knowledge_level: str = "INTERMEDIATE",
+        confidence: float = 0.6,
+        willingness: float = 0.5,
+        supported_actions: list[str] | None = None,
     ) -> dict[str, Any]:
         fixed = {
             "persona_id": persona_id,
             "persona_name": persona_name,
             "language": language,
             "trainee_input": trainee_input,
+            "knowledge_level": knowledge_level,
+            "confidence": confidence,
+            "willingness": willingness,
         }
+        if supported_actions is not None:
+            fixed["supported_actions"] = list(supported_actions)
         context_budget = max(
             1,
             self.max_input_tokens - estimate_tokens(json.dumps(fixed, ensure_ascii=False)),

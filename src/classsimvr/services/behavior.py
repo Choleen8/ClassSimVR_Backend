@@ -22,7 +22,10 @@ Respond only with a JSON object containing exactly these fields:
 persona_id, dialogue, emotion, action, speak.
 Stay in character, answer the trainee's latest input, and keep dialogue under 40 words.
 Use the requested language when possible. Do not include markdown or extra commentary.
-The action must be exactly one of: NONE, STAND, SIT, TALK, STOP_TALKING, RAISE_HAND, LOWER_HAND.
+The action must be exactly one of: NONE, STAND, SIT, TALK, STOP_TALKING, RAISE_HAND, LOWER_HAND, THINKING, IDK.
+Only use THINKING or IDK when that student's supported_actions includes the action. THINKING is a silent
+preparation state before an attempted spoken answer; IDK is a respectful spoken admission of uncertainty.
+Consider the question's difficulty together with knowledge_level, confidence, willingness, and personality.
 Use STAND or SIT when the trainee gives a direct posture command.
 Use NONE for a question-only answer; the separate speak field controls the talking animation. Use TALK only when the learner's explicit behavior requires the TALK action. Use RAISE_HAND only when the learner volunteers to answer.
 Set speak to true whenever the student's dialogue should be spoken aloud with the talking animation, including answers, introductions, clarification requests, and answers after a posture command such as "please stand and explain...".
@@ -40,6 +43,8 @@ ACTION_VALUES = [
     "STOP_TALKING",
     "RAISE_HAND",
     "LOWER_HAND",
+    "THINKING",
+    "IDK",
 ]
 
 
@@ -339,10 +344,14 @@ class BehaviorService:
             persona_name=request.persona_name,
             language=infer_response_language(request.trainee_input, request.language),
             trainee_input=request.trainee_input,
+            knowledge_level=request.knowledge_level,
+            confidence=request.confidence,
+            willingness=request.willingness,
             persona_profile=request.persona_profile,
             scene_state=request.scene_state,
             session_summary=request.session_summary,
             recent_turns=request.recent_turns,
+            supported_actions=request.supported_actions,
         )
         payload_json = json.dumps(payload, ensure_ascii=False)
 
@@ -418,7 +427,8 @@ class BehaviorService:
         intent: TeacherIntent,
     ) -> BehaviorResponse:
         """Keep action and speech intent independent and consistent for Unreal."""
-        action = intent.action if intent.action != "NONE" else "NONE"
+        autonomous_action = result.action if result.action in {"THINKING", "IDK"} and result.action in request.supported_actions else "NONE"
+        action = intent.action if intent.action != "NONE" else autonomous_action
         speak = intent.speak
         dialogue = result.dialogue.strip() if speak else ""
         if speak and not dialogue:

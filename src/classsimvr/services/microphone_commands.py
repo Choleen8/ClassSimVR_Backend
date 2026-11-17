@@ -149,6 +149,10 @@ class MicrophoneCommandRouter:
                     session_id, student, session_summary, memory["summary"]
                 ),
                 recent_turns=history,
+                knowledge_level=student.knowledge_level,
+                confidence=student.confidence,
+                willingness=student.willingness,
+                supported_actions=list(student.supported_actions),
                 clarification_required=(
                     not name_only_address
                     and intent.action == "NONE"
@@ -158,6 +162,16 @@ class MicrophoneCommandRouter:
                 acknowledgment_required=not classroom_wide,
             )
             reply = self.behavior.generate_reply(request)
+            if reply.action in {"THINKING", "IDK"} and reply.action not in student.supported_actions:
+                reply = reply.model_copy(update={"action": "NONE"})
+            thinking_response: BehaviorResponse | None = None
+            if reply.action == "THINKING":
+                thinking_response = reply.model_copy(update={
+                    "dialogue": "",
+                    "speak": False,
+                    "audio_url": None,
+                })
+                reply = reply.model_copy(update={"action": "NONE"})
             behavior_latency = getattr(self.behavior, "latency_status", lambda: {})()
             if behavior_latency.get("llm_generation") is not None:
                 self._last_latency_ms["llm_generation"] = behavior_latency["llm_generation"]
@@ -187,6 +201,8 @@ class MicrophoneCommandRouter:
                     tts_ms += (time.perf_counter() - tts_started) * 1000
             else:
                 reply = reply.model_copy(update={"audio_url": None})
+            if thinking_response is not None:
+                responses.append(thinking_response)
             responses.append(reply)
             if reply.speak or reply.dialogue:
                 self.registry.record_conversation_turn(

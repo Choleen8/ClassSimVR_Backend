@@ -22,6 +22,18 @@ class StudentNotFoundError(StudentRegistryError):
     pass
 
 
+DEFAULT_STUDENT_ACTIONS = (
+    "NONE", "STAND", "SIT", "TALK", "STOP_TALKING", "RAISE_HAND", "LOWER_HAND",
+)
+THINKING_STUDENT_ACTIONS = DEFAULT_STUDENT_ACTIONS + ("THINKING", "IDK")
+KNOWLEDGE_LEVELS = ("ADVANCED", "INTERMEDIATE", "BEGINNER")
+
+
+def normalize_knowledge_level(value: str) -> str:
+    normalized = str(value or "").strip().upper()
+    return normalized if normalized in KNOWLEDGE_LEVELS else "INTERMEDIATE"
+
+
 def _key(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip().casefold())
 
@@ -53,6 +65,8 @@ class StudentProfile:
     knowledge_level: str = "intermediate"
     confidence: float = 0.6
     willingness: float = 0.5
+    gender: str = "unspecified"
+    supported_actions: tuple[str, ...] = DEFAULT_STUDENT_ACTIONS
 
     def normalized_aliases(self) -> tuple[str, ...]:
         values = [self.student_id, self.name, *self.aliases]
@@ -84,7 +98,7 @@ DEFAULT_STUDENT_PROFILES = (
         personality="Maria is a respectful Filipino VR student.",
         language="English",
         voice="fil-PH-BlessicaNeural",
-        knowledge_level="intermediate",
+        knowledge_level="ADVANCED",
         confidence=0.7,
         willingness=0.65,
     ),
@@ -95,9 +109,26 @@ DEFAULT_STUDENT_PROFILES = (
         personality="Robert is a thoughtful Filipino VR student.",
         language="English",
         voice="fil-PH-AngeloNeural",
-        knowledge_level="intermediate",
+        knowledge_level="ADVANCED",
         confidence=0.65,
         willingness=0.5,
+    ),
+    StudentProfile(
+        student_id="ethan-luna",
+        name="Ethan Luna",
+        aliases=("ethan", "ethan luna"),
+        personality=(
+            "Ethan is a friendly, curious, respectful Filipino VR student. "
+            "He is moderately confident, an average student, knows common topics, "
+            "and may struggle with difficult questions."
+        ),
+        language="English",
+        voice="fil-PH-AngeloNeural",
+        knowledge_level="INTERMEDIATE",
+        confidence=0.6,
+        willingness=0.6,
+        gender="male",
+        supported_actions=THINKING_STUDENT_ACTIONS,
     ),
 )
 
@@ -138,9 +169,11 @@ class StudentRegistry:
             language=profile.language.strip() or "English",
             voice=profile.voice.strip() if profile.voice else None,
             initial_state=profile.initial_state.strip() or "engaged",
-            knowledge_level=profile.knowledge_level.strip() or "intermediate",
+            knowledge_level=normalize_knowledge_level(profile.knowledge_level),
             confidence=min(1.0, max(0.0, float(profile.confidence))),
             willingness=min(1.0, max(0.0, float(profile.willingness))),
+            gender=profile.gender.strip() or "unspecified",
+            supported_actions=tuple(dict.fromkeys(profile.supported_actions)),
         )
         with self._lock:
             if student_id in self._profiles:
@@ -395,9 +428,13 @@ class StudentRegistry:
                 language=str(item.get("language", "English")),
                 voice=str(item["voice"]) if item.get("voice") else None,
                 initial_state=str(item.get("initial_state", "engaged")),
-                knowledge_level=str(item.get("knowledge_level", "intermediate")),
+                knowledge_level=normalize_knowledge_level(item.get("knowledge_level", "INTERMEDIATE")),
                 confidence=float(item.get("confidence", 0.6)),
                 willingness=float(item.get("willingness", 0.5)),
+                gender=str(item.get("gender", "unspecified")),
+                supported_actions=tuple(
+                    str(action) for action in item.get("supported_actions", DEFAULT_STUDENT_ACTIONS)
+                ),
             )
             loaded.append(self.register(profile))
         return loaded

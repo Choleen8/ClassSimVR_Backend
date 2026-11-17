@@ -55,6 +55,53 @@ def test_question_response_is_speech_intent_without_physical_action():
     assert models.calls[0]["config"]["response_schema"]["properties"]["speak"]["type"] == "BOOLEAN"
 
 
+def test_behavior_payload_includes_knowledge_and_capability_configuration():
+    models = FakeModels(['{"persona_id":"persona-1","dialogue":"It is a complex topic.","emotion":"calm","action":"NONE","speak":true}'])
+    service = BehaviorService(client=FakeClient(models))
+    service.generate_reply(request().model_copy(update={
+        "knowledge_level": "ADVANCED",
+        "confidence": 0.9,
+        "willingness": 0.8,
+        "supported_actions": ["NONE", "THINKING", "IDK"],
+    }))
+
+    payload = json.loads(models.calls[0]["contents"])
+    assert payload["knowledge_level"] == "ADVANCED"
+    assert payload["confidence"] == 0.9
+    assert payload["willingness"] == 0.8
+    assert payload["supported_actions"] == ["NONE", "THINKING", "IDK"]
+
+
+def test_thinking_action_is_allowed_only_when_student_supports_it():
+    models = FakeModels([
+        '{"persona_id":"persona-1","dialogue":"I think it is related to energy.","emotion":"thinking","action":"THINKING","speak":true}',
+        '{"persona_id":"persona-1","dialogue":"I think it is related to energy.","emotion":"thinking","action":"THINKING","speak":true}',
+    ])
+    service = BehaviorService(client=FakeClient(models))
+
+    unsupported = service.generate_reply(request("Ethan, what is quantum physics?"))
+    supported = service.generate_reply(request("Ethan, what is quantum physics?").model_copy(
+        update={"supported_actions": ["NONE", "THINKING", "IDK"]}
+    ))
+
+    assert unsupported.action == "NONE"
+    assert supported.action == "THINKING"
+    assert supported.speak is True
+
+
+def test_idk_action_is_allowed_for_capable_student():
+    models = FakeModels(['{"persona_id":"persona-1","dialogue":"I am sorry, I do not know yet.","emotion":"apologetic","action":"IDK","speak":true}'])
+    service = BehaviorService(client=FakeClient(models))
+
+    result = service.generate_reply(request("Ethan, what is the hardest theorem?").model_copy(
+        update={"supported_actions": ["NONE", "IDK"]}
+    ))
+
+    assert result.action == "IDK"
+    assert result.dialogue
+    assert result.speak is True
+
+
 def test_empty_llm_dialogue_for_introduction_uses_spoken_fallback():
     models = FakeModels(['{"persona_id":"persona-1","dialogue":"","emotion":"smiling","action":"NONE","speak":false}'])
     service = BehaviorService(client=FakeClient(models))

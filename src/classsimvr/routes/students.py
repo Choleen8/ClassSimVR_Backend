@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ..services.student_registry import (
+    DEFAULT_STUDENT_ACTIONS,
     DuplicateStudentError,
     StudentNotFoundError,
     StudentProfile,
@@ -26,6 +27,10 @@ class StudentRegistrationBody(BaseModel):
     knowledge_level: str = Field(default="intermediate", max_length=40)
     confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     willingness: float = Field(default=0.5, ge=0.0, le=1.0)
+    gender: str = Field(default="unspecified", max_length=30)
+    supported_actions: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_STUDENT_ACTIONS), max_length=20
+    )
 
 
 class StudentStateBody(BaseModel):
@@ -105,6 +110,8 @@ def register_student(
                 knowledge_level=body.knowledge_level,
                 confidence=body.confidence,
                 willingness=body.willingness,
+                gender=body.gender,
+                supported_actions=tuple(body.supported_actions),
             )
         )
     except DuplicateStudentError as error:

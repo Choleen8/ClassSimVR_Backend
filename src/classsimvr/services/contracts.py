@@ -22,6 +22,12 @@ class BehaviorRequest(BaseModel):
     clarification_required: bool = False
     name_only_address: bool = False
     acknowledgment_required: bool = True
+    knowledge_level: str = Field(default="INTERMEDIATE", max_length=20)
+    confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    willingness: float = Field(default=0.5, ge=0.0, le=1.0)
+    supported_actions: list[str] = Field(default_factory=lambda: [
+        "NONE", "STAND", "SIT", "TALK", "STOP_TALKING", "RAISE_HAND", "LOWER_HAND",
+    ], max_length=20)
 
     @field_validator("trainee_input")
     @classmethod

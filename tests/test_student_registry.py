@@ -31,6 +31,41 @@ def test_registry_registers_unique_profiles_and_resolves_aliases():
         registry.register(profile)
 
 
+def test_default_registry_includes_ethan_luna_with_shared_male_voice_and_capabilities():
+    registry = StudentRegistry.with_defaults()
+
+    ethan = registry.get("ethan-luna")
+
+    assert ethan.name == "Ethan Luna"
+    assert {registry.resolve(alias).student_id for alias in ("Ethan", "Ethan Luna")} == {"ethan-luna"}
+    assert ethan.voice == registry.get("robert-eco").voice
+    assert ethan.knowledge_level == "intermediate"
+    assert ethan.confidence == 0.6
+    assert ethan.willingness == 0.6
+    assert "THINKING" in ethan.supported_actions
+    assert "IDK" in ethan.supported_actions
+    assert "THINKING" not in registry.get("maria-sandoval").supported_actions
+    assert registry.get("maria-sandoval").knowledge_level == "ADVANCED"
+    assert registry.get("robert-eco").knowledge_level == "ADVANCED"
+
+
+def test_registry_normalizes_configured_knowledge_levels():
+    registry = StudentRegistry()
+    registry.register(StudentProfile(
+        student_id="student-1",
+        name="Student One",
+        knowledge_level="beginner",
+    ))
+    registry.register(StudentProfile(
+        student_id="student-2",
+        name="Student Two",
+        knowledge_level="not-a-level",
+    ))
+
+    assert registry.get("student-1").knowledge_level == "BEGINNER"
+    assert registry.get("student-2").knowledge_level == "INTERMEDIATE"
+
+
 def test_registry_loads_configuration_and_keeps_per_session_state():
     registry = StudentRegistry()
     registry.load_json(
@@ -110,7 +145,7 @@ def test_legacy_berto_id_is_migrated_without_creating_duplicate_student():
 
     assert [profile.student_id for profile in loaded] == ["robert-eco"]
     assert [profile.student_id for profile in registry.list_students()].count("robert-eco") == 1
-    assert len(registry.list_students()) == 2
+    assert len(registry.list_students()) == 3
 
 
 def test_registry_keeps_chronological_conversation_memory_per_student_and_session():

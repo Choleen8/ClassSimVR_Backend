@@ -39,13 +39,64 @@ def test_routes_named_student_to_maria():
     assert behavior.inputs[0].persona_name == "Maria Sandoval"
 
 
+def test_ethan_thinking_is_sequenced_before_spoken_answer_and_uses_robert_voice():
+    registry = StudentRegistry.with_defaults()
+
+    class ThinkingBehavior(FakeBehavior):
+        def generate_reply(self, request):
+            self.inputs.append(request)
+            return BehaviorResponse(
+                persona_id=request.persona_id,
+                dialogue="I think the answer is related to energy.",
+                emotion="thinking",
+                action="THINKING",
+                speak=True,
+            )
+
+    class VoiceTTS(FakeTTS):
+        def __init__(self):
+            self.calls = []
+
+        def synthesize(self, *args, **kwargs):
+            self.calls.append(kwargs)
+            return super().synthesize(*args, **kwargs)
+
+    tts = VoiceTTS()
+    router = MicrophoneCommandRouter(
+        behavior=ThinkingBehavior(), tts=tts, registry=registry
+    )
+    result = router.handle("Ethan, what is quantum physics?", session_id="classroom")
+
+    assert [response.action for response in result.responses] == ["THINKING", "NONE"]
+    assert result.responses[0].speak is False
+    assert result.responses[1].speak is True
+    assert result.responses[1].audio_url is not None
+    assert tts.calls[0]["voice"] == registry.get("robert-eco").voice
+
+
+def test_ethan_supports_named_stand_and_sit_routing():
+    router = MicrophoneCommandRouter(behavior=FakeBehavior(), tts=FakeTTS())
+
+    standing = router.handle("Ethan, please stand up.", session_id="classroom")
+    seated = router.handle("Ethan Luna, please sit down.", session_id="classroom")
+
+    assert standing.target == "ethan-luna"
+    assert standing.responses[0].persona_id == "ethan-luna"
+    assert standing.responses[0].action == "STAND"
+    assert seated.target == "ethan-luna"
+    assert seated.responses[0].persona_id == "ethan-luna"
+    assert seated.responses[0].action == "SIT"
+
+
 def test_routes_everyone_to_both_students():
     behavior = FakeBehavior()
     router = MicrophoneCommandRouter(behavior=behavior, tts=FakeTTS())
 
     result = router.handle("Everyone, please sit down.", session_id="classroom")
 
-    assert [item.persona_id for item in result.responses] == ["maria-sandoval", "robert-eco"]
+    assert [item.persona_id for item in result.responses] == [
+        "maria-sandoval", "robert-eco", "ethan-luna"
+    ]
     assert all(item.action == "SIT" for item in result.responses)
 
 
