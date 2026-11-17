@@ -5,6 +5,8 @@ pydantic
 httpx
 pytest
 python-dotenv
+itsdangerous
+google-auth
 SQLAlchemy
 litellm
 instructor

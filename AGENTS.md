@@ -123,6 +123,7 @@ Assessment output should use these standards as structured data, not as unvalida
 - Versioned Unreal behavior route:
   `POST /api/v1/sessions/{session_id}/personas/{persona_id}/turn`
   The client sends trainee input and optional scene/history context; the server resolves the assigned persona and runtime state.
+- Server-side Google OAuth login with signed HttpOnly application-session cookies.
 - Legacy behavior route remains available:
   `POST /sessions/{session_id}/turn`
 - OpenAI Responses API behavior generation with strict structured output, bounded input/output tokens, bounded retries, and local fallback behavior.
@@ -141,7 +142,7 @@ Do not describe these as complete merely because ORM tables or placeholder model
 - Production recording upload/storage/deletion adapter and signed object-storage workflow.
 - Asynchronous assessment worker/provider execution over the stored audio-video recording.
 - Production multimodal provider execution over the stored audio-video recording.
-- Authentication, authorization, institution/role boundaries, and supervisor access controls.
+- Production authorization, institution/role boundaries, and supervisor access controls remain; Google OAuth login and a testing application-session cookie are implemented.
 - Database migrations, seed data, production PostgreSQL deployment, queues, observability, and rate limiting.
 - Frontend screens. The current project is primarily a backend service.
 
@@ -168,6 +169,10 @@ Base URL in local development is normally `http://127.0.0.1:8000`.
 
 ```text
 GET    /api/v1/health
+GET    /api/v1/auth/google/login
+GET    /api/v1/auth/google/callback
+GET    /api/v1/auth/me
+POST   /api/v1/auth/logout
 POST   /api/v1/sessions
 POST   /api/v1/sessions/{session_id}/students/generate
 POST   /api/v1/sessions/{session_id}/start
