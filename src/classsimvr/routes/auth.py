@@ -79,7 +79,7 @@ def google_login(service: GoogleOAuthService = Depends(get_auth_service)) -> Red
         location = service.authorization_url(state)
     except OAuthConfigurationError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
-    response = RedirectResponse(location=location, status_code=status.HTTP_302_FOUND)
+    response = RedirectResponse(url=location, status_code=status.HTTP_302_FOUND)
     response.set_cookie(
         service.STATE_COOKIE,
         state,
@@ -117,7 +117,7 @@ async def google_callback(
 
     if service.settings.post_login_redirect:
         response = RedirectResponse(
-            location=service.settings.post_login_redirect,
+            url=service.settings.post_login_redirect,
             status_code=status.HTTP_303_SEE_OTHER,
         )
     else:

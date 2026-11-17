@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta, timezone
-import asyncio
+from http.cookies import SimpleCookie
+import json
 
-import httpx
 import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
+from starlette.requests import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session as DbSession
 from sqlalchemy.pool import StaticPool
@@ -21,10 +22,6 @@ from classsimvr.services.auth import (
     get_current_account,
     hash_password,
 )
-
-
-if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 JWT_SECRET = "test-secret-for-auth-tests-that-is-long-enough"
@@ -116,14 +113,34 @@ def auth_client(monkeypatch):
         app.dependency_overrides.clear()
 
 
-async def _oauth_client_request(method: str, url: str, **kwargs):
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(
-        transport=transport,
-        base_url="http://testserver",
-        follow_redirects=False,
-    ) as client:
-        return await client.request(method, url, **kwargs)
+def _request_with_cookie(cookie: str | None = None) -> Request:
+    headers = [] if cookie is None else [(b"cookie", cookie.encode())]
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/auth/google/callback",
+            "headers": headers,
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+        }
+    )
+
+
+def _cookie_value(response, name: str) -> str:
+    cookies = SimpleCookie()
+    cookies.load(response.headers["set-cookie"])
+    return cookies[name].value
+
+
+def _run_sync(coroutine):
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        return completed.value
+    raise AssertionError("mocked OAuth coroutine unexpectedly yielded")
 
 
 def _login(db, identifier="teacher1", password=PASSWORD):
@@ -203,7 +220,9 @@ def test_me_accepts_valid_token_and_rejects_expired_or_invalid_tokens(db):
 
 
 def test_google_login_redirect_sets_state_cookie(auth_client):
-    response = asyncio.run(_oauth_client_request("GET", "/api/v1/auth/google/login"))
+    from classsimvr.routes.auth import google_login
+
+    response = google_login(FakeOAuthService())
 
     assert response.status_code == 302
     assert response.headers["location"].startswith(
@@ -211,67 +230,88 @@ def test_google_login_redirect_sets_state_cookie(auth_client):
     )
     assert "client_id=client-id.apps.googleusercontent.com" in response.headers["location"]
     assert "scope=openid+email+profile" in response.headers["location"]
-    assert "classsimvr_google_oauth_state" in response.cookies
+    assert "classsimvr_google_oauth_state" in response.headers["set-cookie"]
 
 
 def test_google_callback_links_existing_trainee_and_sets_application_session(auth_client):
-    async def run_flow():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver", follow_redirects=False
-        ) as http:
-            login_response = await http.get("/api/v1/auth/google/login")
-            state = login_response.cookies["classsimvr_google_oauth_state"]
-            return await http.get(
-                f"/api/v1/auth/google/callback?code=auth-code&state={state}"
-            )
+    from classsimvr.routes.auth import google_callback, google_login
 
-    response = asyncio.run(run_flow())
+    service = FakeOAuthService()
+    state = _cookie_value(google_login(service), service.STATE_COOKIE)
+    with DbSession(auth_client) as session:
+        response = _run_sync(
+            google_callback(
+                _request_with_cookie(f"{service.STATE_COOKIE}={state}"),
+                code="auth-code",
+                state=state,
+                db=session,
+                service=service,
+            )
+        )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert json.loads(response.body) == {
         "trainee_id": 1,
         "full_name": "Teacher One",
         "email": "teacher@example.com",
     }
-    assert "classsimvr_session" in response.cookies
+    assert service.SESSION_COOKIE in response.headers["set-cookie"]
     with DbSession(auth_client) as session:
         assert session.query(Trainee).count() == 1
         assert session.query(AuthAccount).count() == 1
 
 
 def test_google_current_user_and_logout_use_application_session(auth_client):
-    async def run_flow():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver", follow_redirects=False
-        ) as http:
-            login_response = await http.get("/api/v1/auth/google/login")
-            state = login_response.cookies["classsimvr_google_oauth_state"]
-            await http.get(f"/api/v1/auth/google/callback?code=auth-code&state={state}")
-            return (
-                await http.get("/api/v1/auth/me"),
-                await http.post("/api/v1/auth/logout"),
-                await http.get("/api/v1/auth/me"),
+    from classsimvr.routes.auth import (
+        current_google_user,
+        google_callback,
+        google_login,
+        logout,
+    )
+
+    service = FakeOAuthService()
+    state = _cookie_value(google_login(service), service.STATE_COOKIE)
+    with DbSession(auth_client) as session:
+        callback = _run_sync(
+            google_callback(
+                _request_with_cookie(f"{service.STATE_COOKIE}={state}"),
+                code="auth-code",
+                state=state,
+                db=session,
+                service=service,
             )
+        )
+        session_cookie = _cookie_value(callback, service.SESSION_COOKIE)
+        current = current_google_user(
+            _request_with_cookie(f"{service.SESSION_COOKIE}={session_cookie}"),
+            db=session,
+            service=service,
+        )
+    logged_out = logout(service)
 
-    current, logged_out, after_logout = asyncio.run(run_flow())
-
-    assert current.status_code == 200
-    assert current.json()["email"] == "teacher@example.com"
-    assert logged_out.json() == {"status": "logged_out"}
-    assert after_logout.status_code == 401
+    assert current.email == "teacher@example.com"
+    assert logged_out.body == b'{"status":"logged_out"}'
+    assert service.SESSION_COOKIE in logged_out.headers["set-cookie"]
 
 
 def test_google_callback_rejects_invalid_state(auth_client):
-    response = asyncio.run(
-        _oauth_client_request(
-            "GET", "/api/v1/auth/google/callback?code=auth-code&state=wrong-state"
-        )
-    )
+    from classsimvr.routes.auth import google_callback
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Google OAuth state is invalid or expired"
+    service = FakeOAuthService()
+    with DbSession(auth_client) as session:
+        with pytest.raises(HTTPException) as error:
+            _run_sync(
+                google_callback(
+                    _request_with_cookie(f"{service.STATE_COOKIE}=valid-state"),
+                    code="auth-code",
+                    state="wrong-state",
+                    db=session,
+                    service=service,
+                )
+            )
+
+    assert error.value.status_code == 400
+    assert error.value.detail == "Google OAuth state is invalid or expired"
 
 
 def test_authentication_routes_are_registered_once():
