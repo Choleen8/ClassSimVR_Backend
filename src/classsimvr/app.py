@@ -8,7 +8,7 @@ from .routes.personas import router as persona_router
 from .routes.sessions import router as session_router
 from .routes.recordings import router as recording_router
 from .routes.assessment import router as assessment_router
-from .routes.auth import router as auth_router
+from .routes.auth import oauth_router, router as auth_router
 from .routes.turns import router as turn_router
 from .routes.microphone import microphone_manager, router as microphone_router
 from .routes.students import router as student_registry_router
@@ -29,6 +29,7 @@ app.include_router(turn_router)
 app.include_router(microphone_router)
 app.include_router(student_registry_router)
 app.include_router(websocket_router)
+app.include_router(oauth_router)
 
 
 @app.on_event("shutdown")

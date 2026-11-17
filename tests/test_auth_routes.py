@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
+import asyncio
 
+import httpx
 import jwt
 import pytest
 from fastapi import HTTPException
@@ -8,39 +10,123 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session as DbSession
 from sqlalchemy.pool import StaticPool
 
+from classsimvr.app import app
+from classsimvr.database import get_session
 from classsimvr.models import AuthAccount, Base, Trainee
-from classsimvr.routes.auth import LoginRequest, login, me
-from classsimvr.services.auth import get_current_account, hash_password
+from classsimvr.routes.auth import LoginRequest, get_auth_service, login, me
+from classsimvr.services.auth import (
+    GoogleIdentity,
+    GoogleOAuthService,
+    GoogleOAuthSettings,
+    get_current_account,
+    hash_password,
+)
 
 
-@pytest.fixture
-def db(monkeypatch):
-    monkeypatch.setenv("JWT_SECRET", "test-secret-for-auth-tests-that-is-long-enough")
-    monkeypatch.setenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30")
+if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+JWT_SECRET = "test-secret-for-auth-tests-that-is-long-enough"
+PASSWORD = "Correct Horse Battery Staple"
+
+
+class FakeOAuthService(GoogleOAuthService):
+    def __init__(self):
+        super().__init__(
+            GoogleOAuthSettings(
+                client_id="client-id.apps.googleusercontent.com",
+                client_secret="client-secret",
+                redirect_uri="http://127.0.0.1:8000/api/v1/auth/google/callback",
+                session_secret="test-session-secret",
+                post_login_redirect=None,
+                session_max_age=3600,
+                cookie_secure=False,
+            )
+        )
+
+    async def exchange_code(self, code: str):
+        assert code == "auth-code"
+        return {"id_token": "fake-id-token"}
+
+    def verify_identity(self, id_token: str):
+        assert id_token == "fake-id-token"
+        return GoogleIdentity(
+            subject="google-sub-1",
+            email="teacher@example.com",
+            full_name="Teacher One",
+        )
+
+
+def _make_engine():
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
-    session = DbSession(engine)
+    return engine
+
+
+def _seed_account(session: DbSession):
     trainee = Trainee(full_name="Teacher One", email="teacher@example.com")
     session.add(trainee)
     session.flush()
-    session.add(AuthAccount(
-        trainee_id=trainee.trainee_id,
-        username="teacher1",
-        email="teacher@example.com",
-        password_hash=hash_password("Correct Horse Battery Staple"),
-    ))
+    session.add(
+        AuthAccount(
+            trainee_id=trainee.trainee_id,
+            username="teacher1",
+            email="teacher@example.com",
+            password_hash=hash_password(PASSWORD),
+        )
+    )
     session.commit()
+
+
+@pytest.fixture
+def db(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", JWT_SECRET)
+    monkeypatch.setenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30")
+    engine = _make_engine()
+    session = DbSession(engine)
+    _seed_account(session)
     try:
         yield session
     finally:
         session.close()
 
 
-def _login(db, identifier="teacher1", password="Correct Horse Battery Staple"):
+@pytest.fixture
+def auth_client(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", JWT_SECRET)
+    monkeypatch.setenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30")
+    engine = _make_engine()
+    with DbSession(engine) as seed_session:
+        _seed_account(seed_session)
+
+    def override_get_session():
+        with DbSession(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_auth_service] = FakeOAuthService
+    try:
+        yield engine
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def _oauth_client_request(method: str, url: str, **kwargs):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        follow_redirects=False,
+    ) as client:
+        return await client.request(method, url, **kwargs)
+
+
+def _login(db, identifier="teacher1", password=PASSWORD):
     return login(LoginRequest(identifier=identifier, password=password), db)
 
 
@@ -50,7 +136,7 @@ def test_login_accepts_username_and_returns_expiring_access_token(db):
     assert response.token_type == "bearer"
     assert response.expires_in == 1800
     assert response.user["username"] == "teacher1"
-    claims = jwt.decode(response.access_token, "test-secret-for-auth-tests-that-is-long-enough", algorithms=["HS256"])
+    claims = jwt.decode(response.access_token, JWT_SECRET, algorithms=["HS256"])
     assert claims["sub"] == str(response.user["trainee_id"])
     assert claims["exp"] > datetime.now(timezone.utc).timestamp()
 
@@ -58,7 +144,7 @@ def test_login_accepts_username_and_returns_expiring_access_token(db):
 def test_password_is_argon2id_hashed_and_trainee_link_is_unique(db):
     account = db.query(AuthAccount).filter_by(username="teacher1").one()
     assert account.password_hash.startswith("$argon2id$")
-    assert "Correct Horse Battery Staple" not in account.password_hash
+    assert PASSWORD not in account.password_hash
     constraints = {constraint.name for constraint in AuthAccount.__table__.constraints}
     assert "uq_auth_account_trainee_id" in constraints
 
@@ -96,8 +182,12 @@ def test_me_accepts_valid_token_and_rejects_expired_or_invalid_tokens(db):
     )
     valid = get_current_account(valid_credentials, db)
     expired_token = jwt.encode(
-        {"sub": "1", "auth_account_id": 1, "exp": datetime.now(timezone.utc) - timedelta(minutes=1)},
-        "test-secret-for-auth-tests-that-is-long-enough",
+        {
+            "sub": "1",
+            "auth_account_id": 1,
+            "exp": datetime.now(timezone.utc) - timedelta(minutes=1),
+        },
+        JWT_SECRET,
         algorithm="HS256",
     )
     expired_credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=expired_token)
@@ -110,3 +200,89 @@ def test_me_accepts_valid_token_and_rejects_expired_or_invalid_tokens(db):
         get_current_account(invalid_credentials, db)
     assert expired.value.status_code == 401
     assert invalid.value.status_code == 401
+
+
+def test_google_login_redirect_sets_state_cookie(auth_client):
+    response = asyncio.run(_oauth_client_request("GET", "/api/v1/auth/google/login"))
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith(
+        "https://accounts.google.com/o/oauth2/v2/auth?"
+    )
+    assert "client_id=client-id.apps.googleusercontent.com" in response.headers["location"]
+    assert "scope=openid+email+profile" in response.headers["location"]
+    assert "classsimvr_google_oauth_state" in response.cookies
+
+
+def test_google_callback_links_existing_trainee_and_sets_application_session(auth_client):
+    async def run_flow():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver", follow_redirects=False
+        ) as http:
+            login_response = await http.get("/api/v1/auth/google/login")
+            state = login_response.cookies["classsimvr_google_oauth_state"]
+            return await http.get(
+                f"/api/v1/auth/google/callback?code=auth-code&state={state}"
+            )
+
+    response = asyncio.run(run_flow())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "trainee_id": 1,
+        "full_name": "Teacher One",
+        "email": "teacher@example.com",
+    }
+    assert "classsimvr_session" in response.cookies
+    with DbSession(auth_client) as session:
+        assert session.query(Trainee).count() == 1
+        assert session.query(AuthAccount).count() == 1
+
+
+def test_google_current_user_and_logout_use_application_session(auth_client):
+    async def run_flow():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver", follow_redirects=False
+        ) as http:
+            login_response = await http.get("/api/v1/auth/google/login")
+            state = login_response.cookies["classsimvr_google_oauth_state"]
+            await http.get(f"/api/v1/auth/google/callback?code=auth-code&state={state}")
+            return (
+                await http.get("/api/v1/auth/me"),
+                await http.post("/api/v1/auth/logout"),
+                await http.get("/api/v1/auth/me"),
+            )
+
+    current, logged_out, after_logout = asyncio.run(run_flow())
+
+    assert current.status_code == 200
+    assert current.json()["email"] == "teacher@example.com"
+    assert logged_out.json() == {"status": "logged_out"}
+    assert after_logout.status_code == 401
+
+
+def test_google_callback_rejects_invalid_state(auth_client):
+    response = asyncio.run(
+        _oauth_client_request(
+            "GET", "/api/v1/auth/google/callback?code=auth-code&state=wrong-state"
+        )
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Google OAuth state is invalid or expired"
+
+
+def test_authentication_routes_are_registered_once():
+    paths = app.openapi()["paths"]
+
+    expected = [
+        "/auth/login",
+        "/auth/me",
+        "/api/v1/auth/google/login",
+        "/api/v1/auth/google/callback",
+        "/api/v1/auth/me",
+        "/api/v1/auth/logout",
+    ]
+    assert all(path in paths for path in expected)

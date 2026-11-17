@@ -24,6 +24,10 @@ Use the versioned JSON API from Unreal:
 
 ```text
 GET  /api/v1/health
+GET  /api/v1/auth/google/login
+GET  /api/v1/auth/google/callback
+GET  /api/v1/auth/me
+POST /api/v1/auth/logout
 POST /api/v1/sessions/{session_id}/students/generate
 POST /api/v1/sessions
 POST /api/v1/sessions/{session_id}/start
@@ -60,6 +64,35 @@ The versioned turn request contains only client context:
   "recent_turns": []
 }
 ```
+
+## Google OAuth login
+
+The backend implements the server-side Google OAuth authorization-code flow.
+Configure the following values in the backend `.env` file:
+
+```text
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
+GOOGLE_REDIRECT_URI=http://127.0.0.1:8000/api/v1/auth/google/callback
+APP_SESSION_SECRET=replace-with-a-long-random-secret
+APP_SESSION_MAX_AGE_SECONDS=28800
+APP_COOKIE_SECURE=false
+```
+
+Use these routes from the login client:
+
+```text
+GET  /api/v1/auth/google/login
+GET  /api/v1/auth/google/callback
+GET  /api/v1/auth/me
+POST /api/v1/auth/logout
+```
+
+The callback verifies the Google identity, creates or reuses a trainee by
+verified email, and sets a signed HttpOnly application-session cookie. The
+Google client secret never goes to Unreal or the browser. Configure the exact
+redirect URI in Google Cloud; production must use HTTPS and set
+`APP_COOKIE_SECURE=true`.
 
 The server resolves the assigned persona and current runtime state, then returns `persona_id`, `dialogue`, `emotion`, `action`, `fallback`, and optional token usage. This keeps Unreal independent from PostgreSQL and prevents client state from overwriting the persona profile.
 
