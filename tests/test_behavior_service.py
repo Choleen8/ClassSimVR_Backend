@@ -2,6 +2,7 @@ from types import SimpleNamespace
 import json
 
 from classsimvr.services.behavior import BehaviorService
+from classsimvr.services.academic_ability import AcademicAbilityController, AcademicAbilityConfig
 from classsimvr.services.contracts import BehaviorRequest
 from classsimvr.services.openai_client import OpenAIConfigurationError, create_openai_client
 from classsimvr.services.student_registry import StudentProfile
@@ -63,6 +64,7 @@ def test_behavior_payload_includes_knowledge_and_capability_configuration():
         "confidence": 0.9,
         "willingness": 0.8,
         "supported_actions": ["NONE", "THINKING", "IDK"],
+        "academic_behavior_enabled": True,
     }))
 
     payload = json.loads(models.calls[0]["contents"])
@@ -94,6 +96,7 @@ def test_grade_eight_ethan_uses_thinking_then_idk_for_beyond_grade_question():
         "persona_name": "Ethan Luna",
         "grade_level": "Grade 8",
         "supported_actions": ["NONE", "THINKING", "IDK"],
+        "academic_behavior_enabled": True,
     }))
 
     assert result.action == "THINKING"
@@ -112,11 +115,96 @@ def test_grade_eight_ethan_treats_quantum_entanglement_as_beyond_grade():
         "persona_name": "Ethan Luna",
         "grade_level": "Grade 8",
         "supported_actions": ["NONE", "THINKING", "IDK"],
+        "academic_behavior_enabled": True,
     }))
 
     assert result.action == "THINKING"
     assert result.speak is True
     assert "don't know" in result.dialogue.casefold() or "do not know" in result.dialogue.casefold()
+
+
+def test_ethan_idk_controller_decision_cannot_be_overridden_by_provider():
+    models = FakeModels(['{"persona_id":"ethan-luna","dialogue":"The password is probably 1234.","emotion":"confident","action":"NONE","speak":true}'])
+    controller = AcademicAbilityController(AcademicAbilityConfig(
+        easy_answer=0.0, easy_thinking=0.0, easy_idk=1.0,
+    ))
+    service = BehaviorService(client=FakeClient(models), academic_controller=controller)
+
+    result = service.generate_reply(request("Ethan, what is my password?").model_copy(update={
+        "persona_id": "ethan-luna",
+        "persona_name": "Ethan Luna",
+        "supported_actions": ["NONE", "THINKING", "IDK"],
+        "academic_behavior_enabled": True,
+    }))
+
+    assert result.action == "IDK"
+    assert result.speak is True
+    assert "don't know" in result.dialogue.casefold() or "do not know" in result.dialogue.casefold()
+    assert models.calls == []
+
+
+def test_ethan_controller_forces_thinking_before_a_provider_answer():
+    models = FakeModels(['{"persona_id":"ethan-luna","dialogue":"The answer is related to Earth\'s tilt.","emotion":"confident","action":"NONE","speak":true}'])
+    controller = AcademicAbilityController(AcademicAbilityConfig(
+        easy_answer=0.0, easy_thinking=1.0, easy_idk=0.0,
+        moderate_answer=0.0, moderate_thinking=1.0, moderate_idk=0.0,
+        hard_answer=0.0, hard_thinking=1.0, hard_idk=0.0,
+        very_hard_answer=0.0, very_hard_thinking=1.0, very_hard_idk=0.0,
+    ))
+    service = BehaviorService(client=FakeClient(models), academic_controller=controller)
+
+    result = service.generate_reply(request("Ethan, why do seasons change?").model_copy(update={
+        "persona_id": "ethan-luna",
+        "persona_name": "Ethan Luna",
+        "supported_actions": ["NONE", "THINKING", "IDK"],
+        "academic_behavior_enabled": True,
+    }))
+
+    assert result.action == "THINKING"
+    assert result.speak is True
+    assert result.dialogue
+
+
+def test_andrea_uses_the_shared_academic_controller_for_idk():
+    models = FakeModels(['{"persona_id":"andrea-guinto","dialogue":"I know the answer.","emotion":"confident","action":"NONE","speak":true}'])
+    controller = AcademicAbilityController(AcademicAbilityConfig(
+        easy_answer=0.0, easy_thinking=0.0, easy_idk=1.0,
+    ))
+    service = BehaviorService(client=FakeClient(models), academic_controller=controller)
+
+    result = service.generate_reply(request("Andrea, what is my password?").model_copy(update={
+        "persona_id": "andrea-guinto",
+        "persona_name": "Andrea Guinto",
+        "supported_actions": ["NONE", "THINKING", "IDK"],
+        "academic_behavior_enabled": True,
+    }))
+
+    assert result.action == "IDK"
+    assert result.speak is True
+    assert "don't know" in result.dialogue.casefold() or "do not know" in result.dialogue.casefold()
+    assert models.calls == []
+
+
+def test_andrea_uses_the_shared_academic_controller_for_thinking():
+    models = FakeModels(['{"persona_id":"andrea-guinto","dialogue":"I think it is related to Earth\'s tilt.","emotion":"confident","action":"NONE","speak":true}'])
+    controller = AcademicAbilityController(AcademicAbilityConfig(
+        easy_answer=0.0, easy_thinking=1.0, easy_idk=0.0,
+        moderate_answer=0.0, moderate_thinking=1.0, moderate_idk=0.0,
+        hard_answer=0.0, hard_thinking=1.0, hard_idk=0.0,
+        very_hard_answer=0.0, very_hard_thinking=1.0, very_hard_idk=0.0,
+    ))
+    service = BehaviorService(client=FakeClient(models), academic_controller=controller)
+
+    result = service.generate_reply(request("Andrea, why do seasons change?").model_copy(update={
+        "persona_id": "andrea-guinto",
+        "persona_name": "Andrea Guinto",
+        "supported_actions": ["NONE", "THINKING", "IDK"],
+        "academic_behavior_enabled": True,
+    }))
+
+    assert result.action == "THINKING"
+    assert result.speak is True
+    assert result.dialogue
 
 
 def test_thinking_action_is_allowed_only_when_student_supports_it():

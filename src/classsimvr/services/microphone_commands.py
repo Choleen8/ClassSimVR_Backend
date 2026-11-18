@@ -156,6 +156,11 @@ class MicrophoneCommandRouter:
                     if selected_grade_level is not None
                     else self.registry.get_selected_grade_level(session_id)
                 ),
+                academic_behavior_enabled=(
+                    student.knowledge_level == "INTERMEDIATE"
+                    and "THINKING" in student.supported_actions
+                    and "IDK" in student.supported_actions
+                ),
                 confidence=student.confidence,
                 willingness=student.willingness,
                 supported_actions=list(student.supported_actions),

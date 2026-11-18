@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .contracts import BehaviorRequest, BehaviorResponse, TokenUsage
+from .academic_ability import AcademicAbilityController, SelectedBehavior
 from .gemini_client import create_gemini_client
 from .token_budget import TokenBudget
 from .student_registry import normalize_grade_level
@@ -34,6 +35,8 @@ questions, do not invent an answer; use THINKING followed by a brief, respectful
 those actions are supported.
 If grade_level is UNSELECTED, do not assume College-level knowledge; stay conservative and acknowledge
 uncertainty for advanced topics.
+If academic_behavior is IDK, do not answer the academic question; give a brief respectful uncertainty
+response. If it is THINKING, give a concise answer or partial answer suitable for that state.
 Use STAND or SIT when the trainee gives a direct posture command.
 Use NONE for a question-only answer; the separate speak field controls the talking animation. Use TALK only when the learner's explicit behavior requires the TALK action. Use RAISE_HAND only when the learner volunteers to answer.
 Set speak to true whenever the student's dialogue should be spoken aloud with the talking animation, including answers, introductions, clarification requests, and answers after a posture command such as "please stand and explain...".
@@ -219,12 +222,14 @@ class BehaviorService:
         budget: TokenBudget | None = None,
         max_retries: int = 2,
         fallback_responses: dict[str, str] | None = None,
+        academic_controller: AcademicAbilityController | None = None,
     ) -> None:
         self.client = client
         self.model = model or os.getenv("GEMINI_BEHAVIOR_MODEL", "gemini-3.5-flash-lite")
         self.budget = budget or TokenBudget()
         self.max_retries = max(0, max_retries)
         self.fallback_responses = fallback_responses or {}
+        self.academic_controller = academic_controller or AcademicAbilityController()
         self._last_latency_ms: dict[str, float | None] = {
             "llm_generation": None,
             "classroom_volunteer_decision": None,
@@ -396,6 +401,39 @@ class BehaviorService:
                 fallback=False,
             )
 
+        academic_decision = None
+        if (
+            request.academic_behavior_enabled
+            and "THINKING" in request.supported_actions
+            and "IDK" in request.supported_actions
+            and request.knowledge_level == "INTERMEDIATE"
+        ):
+            academic_decision = self.academic_controller.select_behavior(
+                request.trainee_input,
+                session_id=request.session_id,
+                persona_id=request.persona_id,
+                knowledge_level=request.knowledge_level,
+                grade_level=request.grade_level,
+            )
+            request = request.model_copy(update={
+                "academic_difficulty": academic_decision.difficulty.value,
+                "academic_behavior": academic_decision.behavior.value,
+            })
+            logger.debug(
+                "Academic behavior selected persona=%s difficulty=%s behavior=%s final_action_pending",
+                request.persona_id,
+                academic_decision.difficulty.value,
+                academic_decision.behavior.value,
+            )
+            if academic_decision.behavior == SelectedBehavior.IDK:
+                self._last_latency_ms["llm_generation"] = 0.0
+                reply = self._idk_reply(request)
+                logger.debug(
+                    "Academic final response persona=%s difficulty=%s selected=IDK action=%s",
+                    request.persona_id, academic_decision.difficulty.value, reply.action,
+                )
+                return reply
+
         llm_started = time.perf_counter()
         payload = self.budget.prepare_payload(
             persona_id=request.persona_id,
@@ -411,6 +449,8 @@ class BehaviorService:
             session_summary=request.session_summary,
             recent_turns=request.recent_turns,
             supported_actions=request.supported_actions,
+            academic_difficulty=request.academic_difficulty,
+            academic_behavior=request.academic_behavior,
         )
         payload_json = json.dumps(payload, ensure_ascii=False)
 
@@ -439,8 +479,26 @@ class BehaviorService:
                 )
                 result = BehaviorResponse.model_validate(json.loads(response.text))
                 if result.persona_id != request.persona_id:
-                    return self._fallback(request, ValueError("model returned the wrong persona"))
+                    return self._apply_academic_decision(
+                        self._fallback(request, ValueError("model returned the wrong persona")),
+                        request,
+                        academic_decision,
+                    )
                 result = self._normalize_result(result, request, intent)
+                if (
+                    academic_decision is not None
+                    and academic_decision.behavior == SelectedBehavior.THINKING
+                    and result.dialogue
+                    and "THINKING" in request.supported_actions
+                ):
+                    result = result.model_copy(update={"action": "THINKING"})
+                logger.debug(
+                    "Academic final response persona=%s difficulty=%s selected=%s action=%s",
+                    request.persona_id,
+                    academic_decision.difficulty.value if academic_decision else None,
+                    academic_decision.behavior.value if academic_decision else None,
+                    result.action,
+                )
                 result.usage = self._usage(response)
                 self._last_latency_ms["llm_generation"] = round(
                     (time.perf_counter() - llm_started) * 1000, 2
@@ -448,7 +506,9 @@ class BehaviorService:
                 return result
             except (json.JSONDecodeError, ValidationError) as error:
                 print(f"Gemini behavior response validation failed: {type(error).__name__}: {error}")
-                return self._fallback(request, error)
+                return self._apply_academic_decision(
+                    self._fallback(request, error), request, academic_decision
+                )
             except Exception as error:  # Provider and parsing failures use the bounded fallback.
                 print(f"Gemini behavior request failed: {type(error).__name__}: {error}")
                 last_error = error
@@ -456,7 +516,9 @@ class BehaviorService:
         self._last_latency_ms["llm_generation"] = round(
             (time.perf_counter() - llm_started) * 1000, 2
         )
-        return self._fallback(request, last_error)
+        return self._apply_academic_decision(
+            self._fallback(request, last_error), request, academic_decision
+        )
 
     def latency_status(self) -> dict[str, float | None]:
         return dict(self._last_latency_ms)
@@ -478,6 +540,43 @@ class BehaviorService:
             speak=True,
             fallback=False,
         )
+
+    @staticmethod
+    def _idk_reply(request: BehaviorRequest) -> BehaviorResponse:
+        language = infer_response_language(request.trainee_input, request.language)
+        if language == "Filipino":
+            dialogue = "Hindi ko po alam, Ma'am."
+        elif language == "Taglish":
+            dialogue = "Sorry po, Ma'am. I'm not sure."
+        else:
+            dialogue = "I'm sorry, Ma'am. I don't know the answer."
+        return BehaviorResponse(
+            persona_id=request.persona_id,
+            dialogue=dialogue,
+            emotion="uncertain",
+            action="IDK",
+            speak=True,
+            fallback=False,
+        )
+
+    @staticmethod
+    def _apply_academic_decision(
+        reply: BehaviorResponse,
+        request: BehaviorRequest,
+        decision: Any | None,
+    ) -> BehaviorResponse:
+        if decision is None:
+            return reply
+        if decision.behavior == SelectedBehavior.IDK:
+            return BehaviorService._idk_reply(request)
+        if (
+            decision.behavior == SelectedBehavior.THINKING
+            and reply.dialogue
+            and reply.speak
+            and "THINKING" in request.supported_actions
+        ):
+            return reply.model_copy(update={"action": "THINKING"})
+        return reply
 
     @staticmethod
     def _normalize_result(

@@ -163,6 +163,22 @@ DEFAULT_STUDENT_PROFILES = (
         gender="male",
         supported_actions=THINKING_STUDENT_ACTIONS,
     ),
+    StudentProfile(
+        student_id="andrea-guinto",
+        name="Andrea Guinto",
+        aliases=("andrea", "andreya", "andria", "andreah", "andrea guinto"),
+        personality=(
+            "Andrea is a friendly, respectful, slightly shy Filipino VR student. "
+            "She is an intermediate student who may need time with difficult questions."
+        ),
+        language="English",
+        voice="en-US-JennyNeural",
+        knowledge_level="INTERMEDIATE",
+        confidence=0.55,
+        willingness=0.55,
+        gender="female",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+    ),
 )
 
 

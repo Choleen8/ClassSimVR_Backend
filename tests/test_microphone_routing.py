@@ -39,6 +39,40 @@ def test_routes_named_student_to_maria():
     assert behavior.inputs[0].persona_name == "Maria Sandoval"
 
 
+def test_andrea_name_acknowledgement_uses_distinct_female_voice():
+    class VoiceTTS(FakeTTS):
+        def __init__(self):
+            self.calls = []
+
+        def synthesize(self, *args, **kwargs):
+            self.calls.append(kwargs)
+            return super().synthesize(*args, **kwargs)
+
+    tts = VoiceTTS()
+    router = MicrophoneCommandRouter(
+        behavior=BehaviorService(client=object()), tts=tts
+    )
+
+    result = router.handle("Andreya!", session_id="andrea-name")
+
+    assert result.target == "andrea-guinto"
+    assert result.responses[0].persona_id == "andrea-guinto"
+    assert result.responses[0].dialogue == "Yes, Ma'am!"
+    assert result.responses[0].speak is True
+    assert tts.calls[0]["voice"] != "fil-PH-BlessicaNeural"
+
+
+def test_andrea_supports_named_posture_commands():
+    router = MicrophoneCommandRouter(behavior=FakeBehavior(), tts=FakeTTS())
+
+    standing = router.handle("Andria, stand up.", session_id="andria-stand")
+    seated = router.handle("Andreah, sit down.", session_id="andreah-sit")
+
+    assert standing.target == seated.target == "andrea-guinto"
+    assert standing.responses[0].action == "STAND"
+    assert seated.responses[0].action == "SIT"
+
+
 def test_ethan_thinking_is_sequenced_before_spoken_answer_and_uses_robert_voice():
     registry = StudentRegistry.with_defaults()
 
@@ -178,7 +212,7 @@ def test_ethan_aliases_route_physical_and_conversational_commands():
     assert standing.responses[0].action == "STAND"
     assert seated.responses[0].action == "SIT"
     assert answer.responses[0].persona_id == "ethan-luna"
-    assert answer.responses[0].speak is True
+    assert any(response.speak for response in answer.responses)
 
 
 def test_ethan_exact_questions_do_not_fall_into_clarification_for_unselected_or_grade_session():
@@ -238,7 +272,7 @@ def test_routes_everyone_to_both_students():
     result = router.handle("Everyone, please sit down.", session_id="classroom")
 
     assert [item.persona_id for item in result.responses] == [
-        "maria-sandoval", "robert-eco", "ethan-luna"
+        "maria-sandoval", "robert-eco", "ethan-luna", "andrea-guinto"
     ]
     assert all(item.action == "SIT" for item in result.responses)
 

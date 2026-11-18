@@ -19,6 +19,7 @@ DEFAULT_VOICE_BY_PERSONA = {
     "berto-eco": "fil-PH-AngeloNeural",
     "robert": "fil-PH-AngeloNeural",
     "robert-eco": "fil-PH-AngeloNeural",
+    "andrea-guinto": "en-US-JennyNeural",
 }
 
 
@@ -34,6 +35,7 @@ class TextToSpeechService:
         "Yes po, Ma'am.",
         "Opo, Ma'am.",
         "Yes, Ma'am?",
+        "Yes, Ma'am!",
         "Ano po, Ma'am?",
         "Sorry, I did not understand. Could you please repeat that?",
         "Pasensya na po, hindi ko naintindihan. Maaari mo bang ulitin?",
