@@ -26,6 +26,7 @@ class BehaviorTurnBody(BaseModel):
     scene_state: str = Field(default="", max_length=12000)
     session_summary: str = Field(default="", max_length=12000)
     recent_turns: list[dict[str, str]] = Field(default_factory=list, max_length=30)
+    grade_level: str | None = Field(default=None, max_length=20)
 
     @field_validator("trainee_input")
     @classmethod

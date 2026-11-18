@@ -88,6 +88,149 @@ def test_ethan_supports_named_stand_and_sit_routing():
     assert seated.responses[0].action == "SIT"
 
 
+def test_ethan_beyond_grade_question_sequences_thinking_then_spoken_idk():
+    from types import SimpleNamespace
+    import json
+
+    class BeyondGradeModels:
+        def generate_content(self, **kwargs):
+            return SimpleNamespace(
+                text=json.dumps({
+                    "persona_id": "ethan-luna",
+                    "dialogue": "Quantum field theory explains particles as fields.",
+                    "emotion": "confident",
+                    "action": "NONE",
+                    "speak": True,
+                })
+            )
+
+    class BeyondGradeClient:
+        models = BeyondGradeModels()
+
+    router = MicrophoneCommandRouter(
+        behavior=BehaviorService(client=BeyondGradeClient()),
+        tts=FakeTTS(),
+    )
+    router.registry.set_selected_grade_level("classroom-grade-8", "Grade 8")
+
+    result = router.handle(
+        "Ethan, explain quantum field theory.", session_id="classroom-grade-8"
+    )
+
+    assert [response.action for response in result.responses] == ["THINKING", "IDK"]
+    assert result.responses[0].speak is False
+    assert result.responses[1].speak is True
+    assert result.responses[1].action == "IDK"
+    assert "don't know" in result.responses[1].dialogue.casefold() or "do not know" in result.responses[1].dialogue.casefold()
+
+
+def test_whisper_eitan_transcript_routes_to_ethan_and_preserves_question():
+    behavior = FakeBehavior()
+    router = MicrophoneCommandRouter(behavior=behavior, tts=FakeTTS())
+
+    transcript = "Eitan, what number I'm thinking right now?"
+    result = router.handle(transcript, session_id="classroom")
+
+    assert result.target == "ethan-luna"
+    assert [item.persona_id for item in result.responses] == ["ethan-luna"]
+    assert behavior.inputs[0].trainee_input == transcript
+
+
+def test_all_failed_ethan_name_transcripts_get_name_only_acknowledgement():
+    router = MicrophoneCommandRouter(
+        behavior=BehaviorService(client=object()), tts=FakeTTS()
+    )
+
+    for transcript in ("Ethan!", "Etan", "Itan.", "Eitan"):
+        result = router.handle(transcript, session_id=f"name-{transcript}")
+
+        assert result.target == "ethan-luna"
+        assert len(result.responses) == 1
+        assert result.responses[0].persona_id == "ethan-luna"
+        assert result.responses[0].dialogue == "Yes, Ma'am!"
+        assert result.responses[0].speak is True
+        assert result.responses[0].audio_url is not None
+
+
+def test_ethan_aliases_route_physical_and_conversational_commands():
+    class ConversationBehavior(BehaviorService):
+        pass
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            from types import SimpleNamespace
+            return SimpleNamespace(
+                text='{"persona_id":"ethan-luna","dialogue":"Two plus two is four.","emotion":"confident","action":"NONE","speak":true}'
+            )
+
+    class FakeClient:
+        models = FakeModels()
+
+    router = MicrophoneCommandRouter(
+        behavior=ConversationBehavior(client=FakeClient()), tts=FakeTTS()
+    )
+
+    standing = router.handle("Etan, stand up.", session_id="etan-stand")
+    seated = router.handle("Itan, sit down.", session_id="itan-sit")
+    answer = router.handle("Eitan, what is two plus two?", session_id="eitan-answer")
+
+    assert standing.target == seated.target == answer.target == "ethan-luna"
+    assert standing.responses[0].action == "STAND"
+    assert seated.responses[0].action == "SIT"
+    assert answer.responses[0].persona_id == "ethan-luna"
+    assert answer.responses[0].speak is True
+
+
+def test_ethan_exact_questions_do_not_fall_into_clarification_for_unselected_or_grade_session():
+    import json
+    from types import SimpleNamespace
+
+    class QuestionModels:
+        def __init__(self):
+            self.calls = []
+
+        def generate_content(self, **kwargs):
+            self.calls.append(kwargs)
+            outputs = [
+                {"dialogue": "The planets are Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune.", "emotion": "confident", "action": "NONE", "speak": True},
+                {"dialogue": "Five plus five is ten.", "emotion": "confident", "action": "NONE", "speak": True},
+                {"dialogue": "I'm sorry, Ma'am. I don't know the answer.", "emotion": "uncertain", "action": "IDK", "speak": True},
+                {"dialogue": "I'm not sure, Ma'am.", "emotion": "uncertain", "action": "IDK", "speak": True},
+            ]
+            output = outputs[(len(self.calls) - 1) % len(outputs)]
+            return SimpleNamespace(text=json.dumps({
+                "persona_id": "ethan-luna",
+                **output,
+            }))
+
+    class QuestionClient:
+        def __init__(self, models):
+            self.models = models
+
+    for grade in (None, "Grade 8"):
+        models = QuestionModels()
+        router = MicrophoneCommandRouter(
+            behavior=BehaviorService(client=QuestionClient(models)), tts=FakeTTS()
+        )
+        session_id = f"ethan-questions-{grade or 'unselected'}"
+        results = [
+            router.handle("Ethan, name all of the planet in our solar system.", session_id=session_id, selected_grade_level=grade),
+            router.handle("Ethan, what is five plus five?", session_id=session_id, selected_grade_level=grade),
+            router.handle("Ethan, explain quantum entanglement.", session_id=session_id, selected_grade_level=grade),
+            router.handle("Ethan, what number am I thinking of right now?", session_id=session_id, selected_grade_level=grade),
+        ]
+
+        assert all(result.target == "ethan-luna" for result in results)
+        assert results[0].responses[0].dialogue.startswith("The planets")
+        assert results[1].responses[0].dialogue == "Five plus five is ten."
+        assert "don't know" in results[2].responses[-1].dialogue.casefold()
+        assert (
+            "not sure" in results[3].responses[-1].dialogue.casefold()
+            or "don't know" in results[3].responses[-1].dialogue.casefold()
+        )
+        assert all(response.speak for result in results for response in result.responses if response.dialogue)
+
+
 def test_routes_everyone_to_both_students():
     behavior = FakeBehavior()
     router = MicrophoneCommandRouter(behavior=behavior, tts=FakeTTS())

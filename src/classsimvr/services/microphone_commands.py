@@ -72,6 +72,7 @@ class MicrophoneCommandRouter:
         session_summary: str = "",
         recent_turns: list[dict[str, str]] | None = None,
         default_persona_id: str = "maria-sandoval",
+        selected_grade_level: str | None = None,
     ) -> CommandResult:
         pipeline_started = time.perf_counter()
         lifecycle_responses = self._lower_hand_responses(
@@ -150,6 +151,11 @@ class MicrophoneCommandRouter:
                 ),
                 recent_turns=history,
                 knowledge_level=student.knowledge_level,
+                grade_level=(
+                    selected_grade_level
+                    if selected_grade_level is not None
+                    else self.registry.get_selected_grade_level(session_id)
+                ),
                 confidence=student.confidence,
                 willingness=student.willingness,
                 supported_actions=list(student.supported_actions),
@@ -171,7 +177,15 @@ class MicrophoneCommandRouter:
                     "speak": False,
                     "audio_url": None,
                 })
-                reply = reply.model_copy(update={"action": "NONE"})
+                # Preserve the supported IDK animation when the thinking
+                # response already contains an uncertainty admission.
+                final_action = (
+                    "IDK"
+                    if reply.emotion.casefold() in {"uncertain", "apologetic"}
+                    and "IDK" in student.supported_actions
+                    else "NONE"
+                )
+                reply = reply.model_copy(update={"action": final_action})
             behavior_latency = getattr(self.behavior, "latency_status", lambda: {})()
             if behavior_latency.get("llm_generation") is not None:
                 self._last_latency_ms["llm_generation"] = behavior_latency["llm_generation"]
@@ -304,7 +318,9 @@ class MicrophoneCommandRouter:
             )
             return []
         if resolution.profile is not None:
-            if not self._is_direct_address(transcript, resolution.profile):
+            if not self._is_direct_address(
+                transcript, resolution.profile, resolution.matched_aliases
+            ):
                 logger.info(
                     "Student routing ignored incidental name mention transcript=%r student=%s",
                     transcript,
@@ -375,10 +391,16 @@ class MicrophoneCommandRouter:
         ).strip()
 
     @classmethod
-    def _is_direct_address(cls, transcript: str, student: StudentRoute) -> bool:
+    def _is_direct_address(
+        cls,
+        transcript: str,
+        student: StudentRoute,
+        matched_aliases: tuple[str, ...] = (),
+    ) -> bool:
         normalized = cls._normalized_address_text(transcript)
         punctuation_text = cls._normalized_address_with_punctuation(transcript)
-        for alias in sorted(student.normalized_aliases(), key=len, reverse=True):
+        aliases = tuple(dict.fromkeys((*matched_aliases, *student.normalized_aliases())))
+        for alias in sorted(aliases, key=len, reverse=True):
             if normalized == alias or normalized.startswith(f"{alias} "):
                 return True
             if re.search(rf",\s*{re.escape(alias)}(?:[.!?]|$)", punctuation_text):

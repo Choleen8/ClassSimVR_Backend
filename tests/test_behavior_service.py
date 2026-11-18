@@ -72,6 +72,53 @@ def test_behavior_payload_includes_knowledge_and_capability_configuration():
     assert payload["supported_actions"] == ["NONE", "THINKING", "IDK"]
 
 
+def test_behavior_payload_includes_grade_level():
+    models = FakeModels(['{"persona_id":"persona-1","dialogue":"It is a school-level answer.","emotion":"calm","action":"NONE","speak":true}'])
+    service = BehaviorService(client=FakeClient(models))
+
+    service.generate_reply(request().model_copy(update={
+        "persona_id": "ethan-luna",
+        "persona_name": "Ethan Luna",
+        "grade_level": "Grade 8",
+    }))
+
+    assert json.loads(models.calls[0]["contents"])["grade_level"] == "Grade 8"
+
+
+def test_grade_eight_ethan_uses_thinking_then_idk_for_beyond_grade_question():
+    models = FakeModels(['{"persona_id":"ethan-luna","dialogue":"Quantum field theory explains particles as fields.","emotion":"confident","action":"NONE","speak":true}'])
+    service = BehaviorService(client=FakeClient(models))
+
+    result = service.generate_reply(request("Ethan, explain quantum field theory.").model_copy(update={
+        "persona_id": "ethan-luna",
+        "persona_name": "Ethan Luna",
+        "grade_level": "Grade 8",
+        "supported_actions": ["NONE", "THINKING", "IDK"],
+    }))
+
+    assert result.action == "THINKING"
+    assert result.speak is True
+    assert result.dialogue
+    assert "don't know" in result.dialogue.casefold() or "do not know" in result.dialogue.casefold()
+
+
+def test_grade_eight_ethan_treats_quantum_entanglement_as_beyond_grade():
+    service = BehaviorService(client=FakeClient(FakeModels([])))
+
+    result = service.generate_reply(request(
+        "Ethan, explain quantum entanglement."
+    ).model_copy(update={
+        "persona_id": "ethan-luna",
+        "persona_name": "Ethan Luna",
+        "grade_level": "Grade 8",
+        "supported_actions": ["NONE", "THINKING", "IDK"],
+    }))
+
+    assert result.action == "THINKING"
+    assert result.speak is True
+    assert "don't know" in result.dialogue.casefold() or "do not know" in result.dialogue.casefold()
+
+
 def test_thinking_action_is_allowed_only_when_student_supports_it():
     models = FakeModels([
         '{"persona_id":"persona-1","dialogue":"I think it is related to energy.","emotion":"thinking","action":"THINKING","speak":true}',
@@ -143,7 +190,7 @@ def test_name_only_address_gets_natural_acknowledgement():
         request("Maria!").model_copy(update={"name_only_address": True})
     )
 
-    assert result.dialogue in {"Yes, Ma'am?", "Ano po, Ma'am?"}
+    assert result.dialogue in {"Yes, Ma'am!", "Ano po, Ma'am?"}
     assert result.action == "NONE"
     assert result.speak is True
 

@@ -40,6 +40,7 @@ def test_default_registry_includes_ethan_luna_with_shared_male_voice_and_capabil
     assert {registry.resolve(alias).student_id for alias in ("Ethan", "Ethan Luna")} == {"ethan-luna"}
     assert ethan.voice == registry.get("robert-eco").voice
     assert ethan.knowledge_level == "INTERMEDIATE"
+    assert not hasattr(ethan, "grade_level")
     assert ethan.confidence == 0.6
     assert ethan.willingness == 0.6
     assert "THINKING" in ethan.supported_actions
@@ -47,6 +48,15 @@ def test_default_registry_includes_ethan_luna_with_shared_male_voice_and_capabil
     assert "THINKING" not in registry.get("maria-sandoval").supported_actions
     assert registry.get("maria-sandoval").knowledge_level == "ADVANCED"
     assert registry.get("robert-eco").knowledge_level == "ADVANCED"
+
+
+@pytest.mark.parametrize("spoken_name", [
+    "Ethan", "Ethan Luna", "Etan", "Itan", "Eitan", "Ethen", "Eithan", "Eton",
+])
+def test_default_registry_resolves_ethan_speech_name_variants(spoken_name):
+    registry = StudentRegistry.with_defaults()
+
+    assert registry.resolve(f"{spoken_name}, what number I'm thinking right now?").student_id == "ethan-luna"
 
 
 def test_registry_normalizes_configured_knowledge_levels():
@@ -64,6 +74,16 @@ def test_registry_normalizes_configured_knowledge_levels():
 
     assert registry.get("student-1").knowledge_level == "BEGINNER"
     assert registry.get("student-2").knowledge_level == "INTERMEDIATE"
+
+
+def test_registry_stores_selected_grade_per_classroom_session():
+    registry = StudentRegistry()
+    assert registry.get_selected_grade_level("classroom") is None
+
+    registry.set_selected_grade_level("classroom", "8")
+
+    assert registry.get_selected_grade_level("classroom") == "Grade 8"
+    assert registry.get_selected_grade_level("other-classroom") is None
 
 
 def test_registry_loads_configuration_and_keeps_per_session_state():

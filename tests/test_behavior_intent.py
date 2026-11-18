@@ -22,6 +22,18 @@ def test_questions_without_punctuation_request_speech():
         assert intent.speak is True
 
 
+def test_imperative_academic_requests_without_question_words_request_speech():
+    for text in (
+        "Ethan, name all of the planets in our solar system",
+        "Ethan, list the planets",
+        "Ethan, identify the largest planet",
+        "Ethan, describe photosynthesis",
+    ):
+        intent = classify_teacher_input(text)
+        assert intent.action == "NONE", text
+        assert intent.speak is True, text
+
+
 def test_physical_command_with_question_requests_both():
     for text in (
         "Stand up, what is int in programming",

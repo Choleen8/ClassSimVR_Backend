@@ -6,6 +6,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from threading import RLock
 from typing import Any
 
@@ -27,11 +28,23 @@ DEFAULT_STUDENT_ACTIONS = (
 )
 THINKING_STUDENT_ACTIONS = DEFAULT_STUDENT_ACTIONS + ("THINKING", "IDK")
 KNOWLEDGE_LEVELS = ("ADVANCED", "INTERMEDIATE", "BEGINNER")
+GRADE_LEVELS = tuple(f"Grade {number}" for number in range(1, 13)) + ("College",)
 
 
 def normalize_knowledge_level(value: str) -> str:
     normalized = str(value or "").strip().upper()
     return normalized if normalized in KNOWLEDGE_LEVELS else "INTERMEDIATE"
+
+
+def normalize_grade_level(value: str | None) -> str | None:
+    """Normalize an optional curriculum level for reusable grade-aware behavior."""
+    normalized = str(value or "").strip().casefold()
+    if not normalized:
+        return None
+    if normalized == "college":
+        return "College"
+    match = re.fullmatch(r"(?:grade\s*)?(1[0-2]|[1-9])", normalized)
+    return f"Grade {int(match.group(1))}" if match else None
 
 
 def _key(value: str) -> str:
@@ -43,6 +56,24 @@ def _match_key(value: str) -> str:
     decomposed = unicodedata.normalize("NFKD", value.casefold())
     without_accents = "".join(char for char in decomposed if not unicodedata.combining(char))
     return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", without_accents)).strip()
+
+
+def _levenshtein_distance(left: str, right: str) -> int:
+    if len(left) < len(right):
+        left, right = right, left
+    if not right:
+        return len(left)
+    previous = list(range(len(right) + 1))
+    for left_index, left_char in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_char in enumerate(right, start=1):
+            current.append(min(
+                current[-1] + 1,
+                previous[right_index] + 1,
+                previous[right_index - 1] + (left_char != right_char),
+            ))
+        previous = current
+    return previous[-1]
 
 
 _LEGACY_STUDENT_IDS = {"berto-eco": "robert-eco"}
@@ -116,7 +147,9 @@ DEFAULT_STUDENT_PROFILES = (
     StudentProfile(
         student_id="ethan-luna",
         name="Ethan Luna",
-        aliases=("ethan", "ethan luna"),
+        aliases=(
+            "ethan", "ethan luna", "etan", "itan", "eitan", "ethen", "eithan", "eton",
+        ),
         personality=(
             "Ethan is a friendly, curious, respectful Filipino VR student. "
             "He is moderately confident, an average student, knows common topics, "
@@ -145,6 +178,7 @@ class StudentRegistry:
         self._aliases: dict[str, str] = {}
         self._states: dict[str, dict[str, StudentSessionState]] = {}
         self._classroom_questions: dict[str, str] = {}
+        self._selected_grade_levels: dict[str, str] = {}
         self._volunteer_rounds: dict[str, int] = {}
         for profile in profiles:
             self.register(profile)
@@ -191,6 +225,21 @@ class StudentRegistry:
         with self._lock:
             return list(self._profiles.values())
 
+    def set_selected_grade_level(self, session_id: str, grade_level: str | None) -> str | None:
+        """Set the shared curriculum level for one classroom session."""
+        normalized = normalize_grade_level(grade_level)
+        with self._lock:
+            key = str(session_id)
+            if normalized is None:
+                self._selected_grade_levels.pop(key, None)
+            else:
+                self._selected_grade_levels[key] = normalized
+            return normalized
+
+    def get_selected_grade_level(self, session_id: str) -> str | None:
+        with self._lock:
+            return self._selected_grade_levels.get(str(session_id))
+
     def get(self, student_id: str) -> StudentProfile:
         with self._lock:
             try:
@@ -209,6 +258,8 @@ class StudentRegistry:
                 for alias, student_id in self._aliases.items()
                 if re.search(rf"\b{re.escape(alias)}\b", normalized_text)
             ]
+            if not matches:
+                matches = self._fuzzy_matches(normalized_text)
         if not matches:
             return StudentResolution(profile=None)
         longest = max(len(alias) for alias, _ in matches)
@@ -218,6 +269,40 @@ class StudentRegistry:
         if len(profiles) != 1:
             return StudentResolution(profile=None, ambiguous=True, matched_aliases=aliases)
         return StudentResolution(profile=next(iter(profiles.values())), matched_aliases=aliases)
+
+    def _fuzzy_matches(self, normalized_text: str) -> list[tuple[str, StudentProfile]]:
+        """Return only high-confidence single-token speech-name matches.
+
+        Whisper name errors are common, but broad fuzzy matching can redirect a
+        command to the wrong student. Restrict fuzzy matching to name-like
+        aliases of at least four characters, require a close edit similarity,
+        and keep all tied best candidates so the caller can reject ambiguity.
+        """
+        tokens = normalized_text.split()
+        candidates: list[tuple[float, str, StudentProfile]] = []
+        for alias, student_id in self._aliases.items():
+            if " " in alias or len(alias) < 4:
+                continue
+            profile = self._profiles[student_id]
+            for token in tokens:
+                if token == alias or len(token) < 4:
+                    continue
+                score = SequenceMatcher(None, token, alias).ratio()
+                edit_distance = _levenshtein_distance(token, alias)
+                max_distance = 1 if len(alias) <= 5 else 2
+                if score >= 0.92 and edit_distance <= max_distance:
+                    candidates.append((score, token, profile))
+
+        if not candidates:
+            return []
+        best_score = max(score for score, _, _ in candidates)
+        # Treat near-ties across different students as ambiguous rather than
+        # guessing. The small margin still permits one clearly best match.
+        best = [candidate for candidate in candidates if best_score - candidate[0] <= 0.03]
+        profiles = {profile.student_id: profile for _, _, profile in best}
+        if len(profiles) != 1:
+            return [(token, profile) for _, token, profile in best]
+        return [(token, next(iter(profiles.values()))) for _, token, _ in best[:1]]
 
     def get_session_state(self, session_id: str, student_id: str) -> StudentSessionState:
         profile = self.get(student_id)

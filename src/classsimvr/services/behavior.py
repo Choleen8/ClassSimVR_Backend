@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from .contracts import BehaviorRequest, BehaviorResponse, TokenUsage
 from .gemini_client import create_gemini_client
 from .token_budget import TokenBudget
+from .student_registry import normalize_grade_level
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,13 @@ The action must be exactly one of: NONE, STAND, SIT, TALK, STOP_TALKING, RAISE_H
 Only use THINKING or IDK when that student's supported_actions includes the action. THINKING is a silent
 preparation state before an attempted spoken answer; IDK is a respectful spoken admission of uncertainty.
 Consider the question's difficulty together with knowledge_level, confidence, willingness, and personality.
+If grade_level is provided, treat it as a curriculum boundary: use grade-appropriate vocabulary and
+do not give advanced explanations beyond that level. For difficult but partly understood questions,
+give a short partial answer and use THINKING when supported. For unfamiliar or clearly beyond-grade
+questions, do not invent an answer; use THINKING followed by a brief, respectful IDK response when
+those actions are supported.
+If grade_level is UNSELECTED, do not assume College-level knowledge; stay conservative and acknowledge
+uncertainty for advanced topics.
 Use STAND or SIT when the trainee gives a direct posture command.
 Use NONE for a question-only answer; the separate speak field controls the talking animation. Use TALK only when the learner's explicit behavior requires the TALK action. Use RAISE_HAND only when the learner volunteers to answer.
 Set speak to true whenever the student's dialogue should be spoken aloud with the talking animation, including answers, introductions, clarification requests, and answers after a posture command such as "please stand and explain...".
@@ -79,6 +87,10 @@ _QUESTION_PATTERNS = (
     r"\bwhen\b",
     r"\bwhere\b",
     r"\bexplain\b",
+    r"\bname\b",
+    r"\blist\b",
+    r"\bidentify\b",
+    r"\benumerate\b",
     r"\btell me\b",
     r"\bdescribe\b",
     r"\bdefine\b",
@@ -97,6 +109,45 @@ _CONVERSATIONAL_PATTERNS = (
     r"\bmagpakilala\b",
     r"\bpakilala ka\b",
 )
+
+_BEYOND_SCHOOL_TOPIC_PATTERNS = (
+    r"\bquantum(?:\s+field)?\s+(?:physics|theory|mechanics)\b",
+    r"\bquantum field theory\b",
+    r"\bquantum entanglement\b",
+    r"\bstring theory\b",
+    r"\b(general|special) relativity\b",
+    r"\bschrodinger(?:'s)? equation\b",
+    r"\btensor calculus\b",
+    r"\bdifferential equations?\b",
+    r"\badvanced calculus\b",
+    r"\borganic chemistry\b",
+)
+
+
+def _is_beyond_grade_level(trainee_input: str, grade_level: str | None) -> bool:
+    """Conservatively flag topics that should not be answered as known by a K-12 learner."""
+    normalized_grade = normalize_grade_level(grade_level)
+    if normalized_grade in (None, "College"):
+        return False
+    return any(re.search(pattern, _normalize_teacher_text(trainee_input)) for pattern in _BEYOND_SCHOOL_TOPIC_PATTERNS)
+
+
+def _grade_limited_reply(request: BehaviorRequest) -> BehaviorResponse:
+    language = infer_response_language(request.trainee_input, request.language)
+    if language == "Filipino":
+        dialogue = "Pasensya na po, Ma'am. Hindi ko po alam ang sagot."
+    elif language == "Taglish":
+        dialogue = "Sorry po, Ma'am. Hindi ko po alam ang sagot."
+    else:
+        dialogue = "I'm sorry, Ma'am. I don't know the answer yet."
+    return BehaviorResponse(
+        persona_id=request.persona_id,
+        dialogue=dialogue,
+        emotion="uncertain",
+        action="THINKING",
+        speak=True,
+        fallback=False,
+    )
 
 
 def classify_teacher_input(trainee_input: str) -> TeacherIntent:
@@ -305,7 +356,7 @@ class BehaviorService:
             language = infer_response_language(request.trainee_input, request.language)
             return BehaviorResponse(
                 persona_id=request.persona_id,
-                dialogue="Ano po, Ma'am?" if language == "Filipino" else "Yes, Ma'am?",
+                dialogue="Ano po, Ma'am?" if language == "Filipino" else "Yes, Ma'am!",
                 emotion="respectful",
                 action="NONE",
                 speak=True,
@@ -314,6 +365,13 @@ class BehaviorService:
         if request.clarification_required:
             self._last_latency_ms["llm_generation"] = 0.0
             return self._clarification_reply(request)
+        if (
+            _is_beyond_grade_level(request.trainee_input, request.grade_level)
+            and "THINKING" in request.supported_actions
+            and "IDK" in request.supported_actions
+        ):
+            self._last_latency_ms["llm_generation"] = 0.0
+            return _grade_limited_reply(request)
         if intent.action != "NONE" and not intent.speak:
             if request.acknowledgment_required:
                 self._last_latency_ms["llm_generation"] = 0.0
@@ -347,6 +405,7 @@ class BehaviorService:
             knowledge_level=request.knowledge_level,
             confidence=request.confidence,
             willingness=request.willingness,
+            grade_level=request.grade_level,
             persona_profile=request.persona_profile,
             scene_state=request.scene_state,
             session_summary=request.session_summary,

@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 class MicrophoneContextBody(BaseModel):
     session_id: str = Field(default="classroom", min_length=1, max_length=128)
+    selected_grade_level: str | None = Field(default=None, max_length=20)
     scene_state: str = Field(default="", max_length=12000)
     session_summary: str = Field(default="", max_length=12000)
     recent_turns: list[dict[str, str]] = Field(default_factory=list, max_length=30)
@@ -86,6 +87,10 @@ class ListeningCoordinator:
     def start(self, body: MicrophoneStartBody | None = None) -> dict:
         request = body or MicrophoneStartBody()
         with self._lifecycle_lock:
+            selected_grade_level = self.router.registry.set_selected_grade_level(
+                request.session_id, request.selected_grade_level
+            )
+            request = request.model_copy(update={"selected_grade_level": selected_grade_level})
             if request.reset_memory:
                 self.router.registry.reset_session(request.session_id)
             with self._lock:
@@ -147,6 +152,9 @@ class ListeningCoordinator:
         status = self.listener.status()
         with self._lock:
             status["queued_responses"] = sum(len(queue) for queue in self._queues.values())
+            status["selected_grade_level"] = self.router.registry.get_selected_grade_level(
+                self._context.session_id
+            )
             status["last_error"] = self._last_error
             status["transcriptions_received"] = self._transcriptions_received
             status["routes_completed"] = self._routes_completed
@@ -232,6 +240,7 @@ class ListeningCoordinator:
                 session_summary=context.session_summary,
                 recent_turns=context.recent_turns,
                 default_persona_id=context.default_persona_id,
+                selected_grade_level=context.selected_grade_level,
             )
             item = MicrophoneStopResponse(
                 transcript=transcript,
