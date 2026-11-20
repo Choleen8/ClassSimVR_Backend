@@ -72,3 +72,36 @@ def test_tts_caches_fixed_acknowledgement_audio_per_voice(tmp_path: Path, monkey
     assert first == second
     assert FakeCommunicate.calls == [("Yes, Ma'am.", "fil-PH-BlessicaNeural")]
     assert service.diagnostics()["cache_hits"] == 1
+
+
+def test_cache_survives_restart_and_keeps_concurrent_voices_separate(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    FakeCommunicate.calls.clear()
+    monkeypatch.setattr(TextToSpeechService, "_run_async", staticmethod(fake_run_async))
+    service = TextToSpeechService(output_dir=tmp_path)
+    def generate(voice):
+        return service.synthesize("Yes, Ma'am!", "test", voice=voice)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        urls = list(pool.map(generate, ["voice-a", "voice-b", "voice-a", "voice-b"]))
+    assert len(set(urls)) == len(FakeCommunicate.calls) == 2
+    restarted = TextToSpeechService(output_dir=tmp_path)
+    assert restarted.synthesize("Yes, Ma'am!", "other", voice="voice-a") == urls[0]
+    assert len(FakeCommunicate.calls) == 2
+
+
+def test_failed_render_never_publishes_partial_mp3(tmp_path, monkeypatch):
+    import pytest
+
+    service = TextToSpeechService(output_dir=tmp_path)
+    def partial(coroutine):
+        coroutine.cr_frame.f_locals["path"].write_bytes(b"incomplete")
+        coroutine.close()
+        assert not list(tmp_path.glob("*.mp3"))
+        raise OSError("stream interrupted")
+
+    monkeypatch.setattr(service, "_run_async", partial)
+    with pytest.raises(OSError, match="interrupted"):
+        service.synthesize("Yes, Ma'am!", "test")
+    assert not list(tmp_path.iterdir())

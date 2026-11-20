@@ -58,6 +58,12 @@ def _match_key(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", without_accents)).strip()
 
 
+def _contains_alias(normalized_text: str, alias: str) -> bool:
+    """Match an alias without relying on Latin-only regex word boundaries."""
+    padded_text = f" {normalized_text} "
+    return f" {alias} " in padded_text
+
+
 def _levenshtein_distance(left: str, right: str) -> int:
     if len(left) < len(right):
         left, right = right, left
@@ -179,6 +185,35 @@ DEFAULT_STUDENT_PROFILES = (
         gender="female",
         supported_actions=THINKING_STUDENT_ACTIONS,
     ),
+    StudentProfile(
+        student_id="judy-castillo",
+        name="Judy Castillo",
+        aliases=("judy", "judi", "judy castillo", "جودي", "جو دی", "جو دي"),
+        personality=(
+            "Judy is a friendly, respectful, cheerful Filipino VR student. "
+            "She is a beginner learner and may be slightly hesitant with difficult questions."
+        ),
+        language="English",
+        voice="en-US-AriaNeural",
+        knowledge_level="BEGINNER",
+        confidence=0.45,
+        willingness=0.55,
+        gender="female",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+    ),
+    StudentProfile(
+        student_id="francis-reyes",
+        name="Francis Reyes",
+        aliases=("francis", "francis reyes", "fransis"),
+        personality="Francis is a friendly, respectful, cooperative Filipino VR student who is reasonably confident.",
+        language="English",
+        voice="en-US-GuyNeural",
+        knowledge_level="INTERMEDIATE",
+        confidence=0.65,
+        willingness=0.7,
+        gender="male",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+    ),
 )
 
 
@@ -272,7 +307,7 @@ class StudentRegistry:
             matches = [
                 (alias, self._profiles[student_id])
                 for alias, student_id in self._aliases.items()
-                if re.search(rf"\b{re.escape(alias)}\b", normalized_text)
+                if _contains_alias(normalized_text, alias)
             ]
             if not matches:
                 matches = self._fuzzy_matches(normalized_text)

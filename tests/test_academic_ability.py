@@ -69,6 +69,16 @@ def test_probability_configuration_can_force_each_behavior(monkeypatch):
     assert decision.behavior == SelectedBehavior.IDK
 
 
+def test_beginner_has_more_uncertainty_probability_than_intermediate():
+    controller = AcademicAbilityController()
+
+    beginner = controller.config.probabilities(Difficulty.HARD, "BEGINNER")
+    intermediate = controller.config.probabilities(Difficulty.HARD, "INTERMEDIATE")
+
+    assert beginner[1] > intermediate[1]
+    assert beginner[2] > intermediate[2]
+
+
 @pytest.mark.parametrize("question, expected", [
     ("What color is the sky?", Difficulty.EASY),
     ("How does a bicycle stay balanced while moving?", Difficulty.MODERATE),

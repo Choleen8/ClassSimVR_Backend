@@ -118,6 +118,9 @@ def test_start_clears_pending_responses_from_previous_listening_session():
     coordinator = ListeningCoordinator()
 
     class FakeListener:
+        def set_student_names(self, names):
+            self.names = names
+
         def start(self, device_name=None):
             return {"state": "listening", "device": device_name}
 
@@ -137,6 +140,7 @@ def test_start_clears_pending_responses_from_previous_listening_session():
 
     coordinator.start(MicrophoneStartBody(session_id="classroom"))
 
+    assert "Francis Reyes" in coordinator.listener.names
     assert coordinator.poll("classroom", limit=10, drain=False) == []
     coordinator.shutdown()
 
@@ -167,6 +171,9 @@ def test_repeated_start_stop_invalidates_previous_generation_safely():
         def __init__(self):
             self.starts = 0
             self.stops = 0
+
+        def set_student_names(self, names):
+            self.names = names
 
         def start(self, device_name=None):
             self.starts += 1

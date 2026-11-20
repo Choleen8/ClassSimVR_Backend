@@ -34,6 +34,21 @@ def test_imperative_academic_requests_without_question_words_request_speech():
         assert intent.speak is True, text
 
 
+def test_additional_academic_imperatives_request_speech():
+    for text in (
+        "Ethan, derive Einstein's field equations",
+        "Andrea, calculate the area of the circle",
+        "Compare mitosis and meiosis",
+        "Evaluate this argument",
+        "Prove that the angles are equal",
+        "Analyze the experiment results",
+        "Solve this equation",
+    ):
+        intent = classify_teacher_input(text)
+        assert intent.action == "NONE", text
+        assert intent.speak is True, text
+
+
 def test_physical_command_with_question_requests_both():
     for text in (
         "Stand up, what is int in programming",

@@ -75,6 +75,7 @@ class MicrophoneCommandRouter:
         selected_grade_level: str | None = None,
     ) -> CommandResult:
         pipeline_started = time.perf_counter()
+        self._last_latency_ms = dict.fromkeys(self._last_latency_ms)
         lifecycle_responses = self._lower_hand_responses(
             session_id,
             self.registry.expire_hand_raises(session_id),
@@ -107,7 +108,6 @@ class MicrophoneCommandRouter:
                 target="classroom" if lifecycle_responses else "none",
                 responses=lifecycle_responses,
             )
-        intent = classify_teacher_input(transcript)
         target_students = self._targets(transcript, default_persona_id)
         self._last_latency_ms["student_routing"] = round(
             (time.perf_counter() - routing_started) * 1000, 2
@@ -192,8 +192,11 @@ class MicrophoneCommandRouter:
                 )
                 reply = reply.model_copy(update={"action": final_action})
             behavior_latency = getattr(self.behavior, "latency_status", lambda: {})()
-            if behavior_latency.get("llm_generation") is not None:
-                self._last_latency_ms["llm_generation"] = behavior_latency["llm_generation"]
+            for stage in ("llm_generation", "academic_selection", "ai_api", "ai_calls"):
+                if behavior_latency.get(stage) is not None:
+                    self._last_latency_ms[stage] = round(
+                        (self._last_latency_ms.get(stage) or 0) + behavior_latency[stage], 2
+                    )
             self.registry.update_session_state(
                 session_id,
                 student.student_id,
@@ -274,9 +277,10 @@ class MicrophoneCommandRouter:
                         audio_url=None,
                         fallback=False,
                     ))
-        latency = getattr(self.behavior, "latency_status", lambda: {})().get("classroom_volunteer_decision")
-        if latency is not None:
-            self._last_latency_ms["classroom_volunteer_decision"] = latency
+        latency = getattr(self.behavior, "latency_status", lambda: {})()
+        for stage in ("classroom_volunteer_decision", "ai_api", "ai_calls"):
+            if stage in latency:
+                self._last_latency_ms[stage] = latency[stage]
         return CommandResult(target="classroom", responses=responses)
 
     def _lower_hand_responses(self, session_id: str, student_ids: list[str]) -> list[BehaviorResponse]:
@@ -392,7 +396,7 @@ class MicrophoneCommandRouter:
             char for char in decomposed if not unicodedata.combining(char)
         )
         return re.sub(
-            r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", transcript_ascii)
+            r"\s+", " ", re.sub(r"[^\w]+", " ", transcript_ascii)
         ).strip()
 
     @classmethod
@@ -438,11 +442,11 @@ class MicrophoneCommandRouter:
         if len(segments) >= 2:
             candidates.extend((segments[0], segments[-1]))
         else:
-            tokens = re.findall(r"[a-z0-9']+", transcript.casefold())
+            tokens = re.findall(r"[\w']+", transcript.casefold())
             if tokens:
                 candidates.append(tokens[0])
         for candidate in candidates:
-            tokens = re.findall(r"[a-z0-9']+", candidate.casefold())
+            tokens = re.findall(r"[\w']+", candidate.casefold())
             if tokens and not any(token in _ADDRESS_STOP_WORDS for token in tokens):
                 return True
         return False

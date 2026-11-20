@@ -20,6 +20,27 @@ The behavior service sends bounded persona, scene, summary, and recent-turn cont
 
 ## Unreal integration contract
 
+### Microphone transcription on a Windows NVIDIA laptop
+
+Install the optional runtime in the backend environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-gpu-windows.txt
+```
+
+For the tested RTX 2050 configuration, set these values in the local `.env` and restart the backend:
+
+```dotenv
+WHISPER_DEVICE=auto
+WHISPER_COMPUTE_TYPE=int8_float16
+WHISPER_MODEL=small
+WHISPER_LANGUAGE=auto
+```
+
+Microphone start loads the model once and checks CUDA with an inference before recording. Automatic mode uses CPU int8 if CUDA is unavailable or runs out of memory. To reserve the GPU for VR, set `WHISPER_DEVICE=cpu` and `WHISPER_COMPUTE_TYPE=int8`. Check `GET /microphone/status` after starting to see the effective device and any fallback reason.
+
+The `Response latency` and `Response drained` log entries share a command ID. The first measures time from the last speech frame to a queued response, including the configured pause. The second measures queue wait until the client drains the response. Audio playback on the headset happens after that point. Common acknowledgment MP3s are reusable across backend restarts, keyed by voice and spoken text.
+
 Use the versioned JSON API from Unreal:
 
 ```text

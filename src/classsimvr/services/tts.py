@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import sys
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 
 import edge_tts
@@ -20,6 +22,8 @@ DEFAULT_VOICE_BY_PERSONA = {
     "robert": "fil-PH-AngeloNeural",
     "robert-eco": "fil-PH-AngeloNeural",
     "andrea-guinto": "en-US-JennyNeural",
+    "judy-castillo": "en-US-AriaNeural",
+    "francis-reyes": "en-US-GuyNeural",
 }
 
 
@@ -62,7 +66,8 @@ class TextToSpeechService:
         self.default_voice = default_voice or os.getenv(
             "EDGE_TTS_DEFAULT_VOICE", "fil-PH-BlessicaNeural"
         )
-        self._cache: dict[tuple[str, str], str] = {}
+        self._cached_phrases: set[str] = set()
+        self._render_locks = [threading.Lock() for _ in range(32)]
         self._cache_lock = threading.RLock()
         self._cache_hits = 0
         self._last_generation_ms: float | None = None
@@ -114,33 +119,38 @@ class TextToSpeechService:
         safe_stem = re.sub(r"[^a-zA-Z0-9_-]", "_", file_stem).strip("_") or "turn"
         filename = f"{safe_stem}-{uuid.uuid4().hex}.mp3"
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = self.output_dir / filename
         voice = self._voice_for_persona(persona_id, persona_name, voice)
-
-        if text.strip() in self._CACHEABLE_TEXTS:
-            cache_key = (text.strip(), voice)
-            with self._cache_lock:
-                cached = self._cache.get(cache_key)
-                if cached and (self.output_dir / cached.rsplit("/", 1)[-1]).exists():
-                    self._cache_hits += 1
-                    self._last_generation_ms = 0.0
-                    return cached
-
-        # The FastAPI behavior handlers are synchronous by design. Edge TTS is
-        # async, so run one synthesis operation without changing the route API.
         started = time.perf_counter()
-        self._run_async(self._save_audio(text, voice, output_path))
-        self._last_generation_ms = round((time.perf_counter() - started) * 1000, 2)
-        audio_url = f"{self.public_base_url}/audio/{filename}"
-        if text.strip() in self._CACHEABLE_TEXTS:
+        cacheable = text.strip() in self._CACHEABLE_TEXTS
+        render_lock = nullcontext()
+        if cacheable:
+            text = text.strip()
+            digest = hashlib.sha256(f"edge-mp3-v1|{voice}|{text}".encode()).hexdigest()
+            filename = f"ack-{digest}.mp3"
+            render_lock = self._render_locks[int(digest[:2], 16) % len(self._render_locks)]
+        output_path = self.output_dir / filename
+        with render_lock:
+            cached = cacheable and output_path.is_file() and output_path.stat().st_size > 0
+            if not cached:
+                temporary = output_path.with_suffix(f".{uuid.uuid4().hex}.part")
+                try:
+                    self._run_async(self._save_audio(text, voice, temporary))
+                    if temporary.stat().st_size == 0:
+                        raise ValueError("Edge TTS returned empty audio")
+                    temporary.replace(output_path)
+                finally:
+                    temporary.unlink(missing_ok=True)
             with self._cache_lock:
-                self._cache[(text.strip(), voice)] = audio_url
-        return audio_url
+                if cacheable:
+                    self._cached_phrases.add(filename)
+                self._cache_hits += int(cached)
+                self._last_generation_ms = round((time.perf_counter() - started) * 1000, 2)
+        return f"{self.public_base_url}/audio/{filename}"
 
     def diagnostics(self) -> dict:
         return {
             "last_generation_ms": self._last_generation_ms,
             "cache_hits": self._cache_hits,
-            "cached_phrases": len(self._cache),
+            "cached_phrases": len(self._cached_phrases),
         }
 

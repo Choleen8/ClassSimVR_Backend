@@ -6,6 +6,7 @@ import re
 import unicodedata
 import time
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -104,6 +105,16 @@ _QUESTION_PATTERNS = (
     r"\b(is|are|does|do|can|will|should)\b",
 )
 
+_ACADEMIC_IMPERATIVE_PATTERNS = (
+    r"\bderive\b",
+    r"\bcalculate\b",
+    r"\bcompare\b",
+    r"\bevaluate\b",
+    r"\bprove\b",
+    r"\banalyze\b",
+    r"\bsolve\b",
+)
+
 _CONVERSATIONAL_PATTERNS = (
     r"\bintroduce yourself\b",
     r"\bintroduce your self\b",
@@ -179,6 +190,9 @@ def classify_teacher_input(trainee_input: str) -> TeacherIntent:
         if pattern != r"\?" and pattern != r"\b(is|are|does|do|can|will|should)\b"
     ) or bool(re.search(r"\b(is|are|does|do)\b", text))
     asks_for_answer = asks_for_answer or any(
+        re.search(pattern, text) for pattern in _ACADEMIC_IMPERATIVE_PATTERNS
+    )
+    asks_for_answer = asks_for_answer or any(
         re.search(pattern, text) for pattern in _CONVERSATIONAL_PATTERNS
     )
     return TeacherIntent(action=action, speak=asks_for_answer)
@@ -230,10 +244,13 @@ class BehaviorService:
         self.max_retries = max(0, max_retries)
         self.fallback_responses = fallback_responses or {}
         self.academic_controller = academic_controller or AcademicAbilityController()
-        self._last_latency_ms: dict[str, float | None] = {
-            "llm_generation": None,
-            "classroom_volunteer_decision": None,
-        }
+        self._timings = threading.local()
+
+    @property
+    def _last_latency_ms(self) -> dict[str, float | None]:
+        if not hasattr(self._timings, "stages"):
+            self._timings.stages = {"llm_generation": None, "classroom_volunteer_decision": None}
+        return self._timings.stages
 
     def decide_classroom_volunteers(
         self,
@@ -271,9 +288,10 @@ class BehaviorService:
         )
         started = time.perf_counter()
         last_error: Exception | None = None
+        self._last_latency_ms.update(ai_api=0.0, ai_calls=0)
         for _ in range(self.max_retries + 1):
             try:
-                response = self._client().models.generate_content(
+                response = self._timed_generation(
                     model=self.model,
                     contents=prompt,
                     config={
@@ -321,6 +339,8 @@ class BehaviorService:
             except Exception as error:
                 last_error = error
                 logger.warning("Classroom volunteer batch decision failed: %s", error)
+                if getattr(error, "code", None) in (400, 401, 403, 404):
+                    break
         self._last_latency_ms["classroom_volunteer_decision"] = round(
             (time.perf_counter() - started) * 1000, 2
         )
@@ -355,6 +375,7 @@ class BehaviorService:
         return result
 
     def generate_reply(self, request: BehaviorRequest) -> BehaviorResponse:
+        self._last_latency_ms.update(academic_selection=0.0, ai_api=0.0, ai_calls=0, llm_generation=0.0)
         intent = classify_teacher_input(request.trainee_input)
         if request.name_only_address:
             self._last_latency_ms["llm_generation"] = 0.0
@@ -408,6 +429,7 @@ class BehaviorService:
             and "IDK" in request.supported_actions
             and request.knowledge_level == "INTERMEDIATE"
         ):
+            academic_started = time.perf_counter()
             academic_decision = self.academic_controller.select_behavior(
                 request.trainee_input,
                 session_id=request.session_id,
@@ -415,6 +437,7 @@ class BehaviorService:
                 knowledge_level=request.knowledge_level,
                 grade_level=request.grade_level,
             )
+            self._last_latency_ms["academic_selection"] = round((time.perf_counter() - academic_started) * 1000, 2)
             request = request.model_copy(update={
                 "academic_difficulty": academic_decision.difficulty.value,
                 "academic_behavior": academic_decision.behavior.value,
@@ -457,7 +480,7 @@ class BehaviorService:
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
             try:
-                response = self._client().models.generate_content(
+                response = self._timed_generation(
                     model=self.model,
                     contents=payload_json,
                     config={
@@ -477,6 +500,7 @@ class BehaviorService:
                         },
                     },
                 )
+                self._last_latency_ms["llm_generation"] = round((time.perf_counter() - llm_started) * 1000, 2)
                 result = BehaviorResponse.model_validate(json.loads(response.text))
                 if result.persona_id != request.persona_id:
                     return self._apply_academic_decision(
@@ -512,6 +536,8 @@ class BehaviorService:
             except Exception as error:  # Provider and parsing failures use the bounded fallback.
                 print(f"Gemini behavior request failed: {type(error).__name__}: {error}")
                 last_error = error
+                if getattr(error, "code", None) in (400, 401, 403, 404):
+                    break
 
         self._last_latency_ms["llm_generation"] = round(
             (time.perf_counter() - llm_started) * 1000, 2
@@ -519,6 +545,14 @@ class BehaviorService:
         return self._apply_academic_decision(
             self._fallback(request, last_error), request, academic_decision
         )
+
+    def _timed_generation(self, **kwargs):
+        started = time.perf_counter()
+        self._last_latency_ms["ai_calls"] += 1
+        try:
+            return self._client().models.generate_content(**kwargs)
+        finally:
+            self._last_latency_ms["ai_api"] += round((time.perf_counter() - started) * 1000, 2)
 
     def latency_status(self) -> dict[str, float | None]:
         return dict(self._last_latency_ms)

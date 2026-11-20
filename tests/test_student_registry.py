@@ -65,6 +65,27 @@ def test_default_registry_includes_andrea_with_distinct_female_voice_and_capabil
     assert "IDK" in andrea.supported_actions
 
 
+def test_default_registry_includes_judy_as_beginner_female_student():
+    registry = StudentRegistry.with_defaults()
+
+    judy = registry.get("judy-castillo")
+
+    assert judy.name == "Judy Castillo"
+    assert judy.gender == "female"
+    assert judy.voice == "en-US-AriaNeural"
+    assert judy.knowledge_level == "BEGINNER"
+    assert not hasattr(judy, "grade_level")
+    assert "THINKING" in judy.supported_actions
+    assert "IDK" in judy.supported_actions
+
+
+@pytest.mark.parametrize("spoken_name", ["Judy", "Judi", "Judy Castillo", "جودي", "جو دی"])
+def test_default_registry_resolves_judy_aliases(spoken_name):
+    registry = StudentRegistry.with_defaults()
+
+    assert registry.resolve(f"{spoken_name}, please stand up").student_id == "judy-castillo"
+
+
 @pytest.mark.parametrize("spoken_name", ["Andrea", "Andreya", "Andria", "Andreah", "Andrea Guinto"])
 def test_default_registry_resolves_andrea_aliases(spoken_name):
     registry = StudentRegistry.with_defaults()
@@ -187,7 +208,7 @@ def test_legacy_berto_id_is_migrated_without_creating_duplicate_student():
 
     assert [profile.student_id for profile in loaded] == ["robert-eco"]
     assert [profile.student_id for profile in registry.list_students()].count("robert-eco") == 1
-    assert len(registry.list_students()) == 4
+    assert len(registry.list_students()) == 6
 
 
 def test_registry_keeps_chronological_conversation_memory_per_student_and_session():

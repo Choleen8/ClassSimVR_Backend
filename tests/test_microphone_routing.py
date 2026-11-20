@@ -73,6 +73,43 @@ def test_andrea_supports_named_posture_commands():
     assert seated.responses[0].action == "SIT"
 
 
+def test_judy_name_only_acknowledges_without_standing_and_uses_her_voice():
+    class VoiceTTS(FakeTTS):
+        def __init__(self):
+            self.calls = []
+
+        def synthesize(self, *args, **kwargs):
+            self.calls.append(kwargs)
+            return super().synthesize(*args, **kwargs)
+
+    tts = VoiceTTS()
+    router = MicrophoneCommandRouter(
+        behavior=BehaviorService(client=object()), tts=tts
+    )
+
+    result = router.handle("Judi!", session_id="judy-name")
+
+    assert result.target == "judy-castillo"
+    assert [response.action for response in result.responses] == ["NONE"]
+    assert result.responses[0].dialogue == "Yes, Ma'am!"
+    assert result.responses[0].speak is True
+    assert tts.calls[0]["voice"] == "en-US-AriaNeural"
+
+
+def test_arabic_script_judy_transcripts_acknowledge_as_judy():
+    router = MicrophoneCommandRouter(
+        behavior=BehaviorService(client=object()), tts=FakeTTS()
+    )
+
+    for transcript in ("جودي", "جو دی."):
+        result = router.handle(transcript, session_id=f"judy-arabic-{transcript}")
+        assert result.target == "judy-castillo"
+        assert result.responses[0].persona_id == "judy-castillo"
+        assert result.responses[0].dialogue == "Yes, Ma'am!"
+        assert result.responses[0].action == "NONE"
+        assert result.responses[0].speak is True
+
+
 def test_ethan_thinking_is_sequenced_before_spoken_answer_and_uses_robert_voice():
     registry = StudentRegistry.with_defaults()
 
@@ -265,14 +302,123 @@ def test_ethan_exact_questions_do_not_fall_into_clarification_for_unselected_or_
         assert all(response.speak for result in results for response in result.responses if response.dialogue)
 
 
-def test_routes_everyone_to_both_students():
+def test_unknowable_personal_questions_are_deterministic_idk_for_intermediate_students():
+    router = MicrophoneCommandRouter(
+        behavior=BehaviorService(client=object()), tts=FakeTTS()
+    )
+    questions = (
+        "What did I eat yesterday?",
+        "What did I eat for breakfast yesterday?",
+        "What was I wearing yesterday?",
+        "What number am I thinking of?",
+        "What is inside my bag?",
+    )
+
+    for student_name, student_id in (
+        ("Ethan", "ethan-luna"),
+        ("Andrea", "andrea-guinto"),
+        ("Francis", "francis-reyes"),
+    ):
+        for index, question in enumerate(questions):
+            result = router.handle(
+                f"{student_name}, {question}",
+                session_id=f"unknowable-{student_id}-{index}",
+            )
+            assert result.target == student_id
+            assert [response.action for response in result.responses] == ["IDK"]
+            assert result.responses[0].speak is True
+            assert result.responses[0].dialogue
+            assert result.responses[0].audio_url is not None
+
+
+def test_derive_question_is_not_misclassified_as_clarification():
+    class DeriveModels:
+        def generate_content(self, **kwargs):
+            import json
+            from types import SimpleNamespace
+
+            return SimpleNamespace(text=json.dumps({
+                "persona_id": "ethan-luna",
+                "dialogue": "I am not sure how to derive that, Ma'am.",
+                "emotion": "thoughtful",
+                "action": "NONE",
+                "speak": True,
+            }))
+
+    class DeriveClient:
+        models = DeriveModels()
+
+    router = MicrophoneCommandRouter(
+        behavior=BehaviorService(client=DeriveClient()), tts=FakeTTS()
+    )
+    result = router.handle(
+        "Ethan, derive Einstein's field equations.",
+        session_id="derive-regression",
+    )
+
+    assert result.target == "ethan-luna"
+    assert result.responses[0].dialogue != "Sorry, I did not understand. Could you please repeat that?"
+    assert result.responses[0].speak is True
+
+
+def test_francis_aliases_posture_and_session_grade_sequence():
+    from unittest.mock import Mock
+
+    tts = Mock(spec=FakeTTS)
+    tts.synthesize.return_value = "http://localhost/audio/test.mp3"
+    router = MicrophoneCommandRouter(behavior=BehaviorService(client=object()), tts=tts)
+    session = "francis-test"
+    student = router.registry.get("francis-reyes")
+    assert student.knowledge_level == "INTERMEDIATE" and student.gender == "male"
+    assert student.voice == "en-US-GuyNeural"
+    assert all(other.voice != student.voice for other in router.registry.list_students() if other != student)
+    assert {"NONE", "TALK", "STAND", "SIT", "RAISE_HAND", "LOWER_HAND", "THINKING", "IDK"} <= set(student.supported_actions)
+    for alias in ("Francis", "Francis Reyes", "Fransis"):
+        result = router.handle(alias, session_id=session)
+        assert result.target == student.student_id
+        reply, = result.responses
+        assert (reply.persona_id, reply.action, reply.dialogue, reply.speak) == (
+            student.student_id, "NONE", "Yes, Ma'am!", True
+        )
+        assert reply.audio_url == tts.synthesize.return_value
+        assert tts.synthesize.call_args.kwargs["voice"] == student.voice
+
+    assert router.handle("Fransis, stand up.", session_id=session).responses[0].action == "STAND"
+    assert router.handle("Sit down, Francis Reyes.", session_id=session).responses[0].action == "SIT"
+    assert router.registry.get_selected_grade_level(session) is None
+    router.registry.set_selected_grade_level(session, "Grade 8")
+    result = router.handle("Francis, explain quantum field theory.", session_id=session)
+    assert [(reply.action, reply.speak) for reply in result.responses] == [("THINKING", False), ("IDK", True)]
+    assert router.registry.get_conversation_memory(session, student.student_id)["first_teacher_question"] == "Francis"
+    assert not router.registry.get_conversation_memory(session, "ethan-luna")["recent_turns"]
+    assert not router.registry.get_conversation_memory("another-class", student.student_id)["recent_turns"]
+
+
+def test_francis_volunteers_silently_and_lowers_hand_before_selection_reply():
+    class VolunteerBehavior(BehaviorService):
+        def decide_classroom_volunteers(self, question, students, *, round_number=0):
+            assert any(student.student_id == "francis-reyes" for student in students)
+            return {"francis-reyes": "RAISE_HAND"}
+
+    router = MicrophoneCommandRouter(behavior=VolunteerBehavior(client=object()), tts=FakeTTS())
+    invitation = router.handle("Who wants to answer?", session_id="francis-hands")
+    assert [(r.persona_id, r.action, r.speak) for r in invitation.responses] == [
+        ("francis-reyes", "RAISE_HAND", False)
+    ]
+    selected = router.handle("Francis", session_id="francis-hands")
+    assert [(r.persona_id, r.action, r.speak) for r in selected.responses] == [
+        ("francis-reyes", "LOWER_HAND", False), ("francis-reyes", "NONE", True)
+    ]
+
+
+def test_routes_everyone_to_all_default_students():
     behavior = FakeBehavior()
     router = MicrophoneCommandRouter(behavior=behavior, tts=FakeTTS())
 
     result = router.handle("Everyone, please sit down.", session_id="classroom")
 
     assert [item.persona_id for item in result.responses] == [
-        "maria-sandoval", "robert-eco", "ethan-luna", "andrea-guinto"
+        "maria-sandoval", "robert-eco", "ethan-luna", "andrea-guinto", "judy-castillo", "francis-reyes"
     ]
     assert all(item.action == "SIT" for item in result.responses)
 

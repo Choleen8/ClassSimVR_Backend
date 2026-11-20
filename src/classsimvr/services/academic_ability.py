@@ -85,6 +85,10 @@ class AcademicDecision:
 
 _PRIVATE_INFORMATION_PATTERNS = (
     r"\bwhat (?:number|am i) (?:am i )?thinking\b",
+    r"\bwhat (?:number|am i) (?:am i )?thinking of\b",
+    r"\bwhat did i eat(?: for (?:breakfast|lunch|dinner))?(?: yesterday| today| this morning)\b",
+    r"\bwhat was i wearing(?: yesterday| today| earlier)\b",
+    r"\bwhat(?: is| was) inside my bag\b",
     r"\bwhat(?:'s| is) my (?:password|pin|secret|exact location)\b",
     r"\b(?:read|guess) my mind\b",
     r"\bwhat will happen to me tomorrow\b",
