@@ -1,9 +1,102 @@
+import pytest
+
 from classsimvr.services.behavior import BehaviorService
 from classsimvr.services.contracts import BehaviorResponse
 from classsimvr.services.microphone_commands import MicrophoneCommandRouter
 from classsimvr.services.student_registry import StudentProfile, StudentRegistry
 
+@pytest.mark.parametrize("student_name,student_id", [
+    ("Francis", "francis-reyes"),
+    ("Ethan", "ethan-luna"),
+    ("Judy", "judy-castillo"),
+])
+def test_spoken_idk_has_one_silent_thinking_prelude(student_name, student_id):
+    from unittest.mock import Mock
 
+    behavior = Mock()
+    behavior.generate_reply.return_value = BehaviorResponse(
+        persona_id=student_id,
+        dialogue="I'm sorry, Ma'am. I don't know the answer.",
+        emotion="uncertain", action="IDK", speak=True,
+    )
+    behavior.latency_status.return_value = {}
+    tts = Mock()
+    tts.synthesize.return_value = "http://localhost/audio/uncertainty.mp3"
+    router = MicrophoneCommandRouter(behavior=behavior, tts=tts)
+    result = router.handle(
+        f"{student_name}, derive Einstein's field equations.", session_id="sequence-idk",
+    )
+    assert result.target == student_id
+    assert [(r.action, r.speak) for r in result.responses] == [
+        ("THINKING", False), ("IDK", True),
+    ]
+    thinking, final = result.responses
+    assert thinking.persona_id == final.persona_id == student_id
+    assert thinking.dialogue == "" and thinking.audio_url is None
+    assert final.dialogue == behavior.generate_reply.return_value.dialogue
+    assert final.audio_url == tts.synthesize.return_value
+    tts.synthesize.assert_called_once()
+    assert tts.synthesize.call_args.kwargs["voice"] == router.registry.get(student_id).voice
+
+
+@pytest.mark.parametrize("student_name,student_id", [
+    ("Francis", "francis-reyes"), ("Ethan", "ethan-luna"),
+])
+@pytest.mark.parametrize("selected,expected_actions", [
+    ("answer", ["NONE"]),
+    ("thinking", ["THINKING", "NONE"]),
+    ("idk", ["THINKING", "IDK"]),
+])
+def test_real_ability_decision_keeps_answer_thinking_and_idk_distinct(
+    student_name, student_id, selected, expected_actions,
+):
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from classsimvr.services.academic_ability import AcademicAbilityConfig, AcademicAbilityController
+
+    models = Mock()
+    models.generate_content.return_value = SimpleNamespace(text=json.dumps({
+        "persona_id": student_id, "dialogue": "I understand part of the topic, Ma'am.",
+        "emotion": "respectful", "action": "NONE", "speak": True,
+    }))
+    config = AcademicAbilityConfig(**{
+        f"hard_{behavior}": float(behavior == selected)
+        for behavior in ("answer", "thinking", "idk")
+    })
+    router = MicrophoneCommandRouter(
+        behavior=BehaviorService(
+            client=SimpleNamespace(models=models),
+            academic_controller=AcademicAbilityController(config),
+        ),
+        tts=FakeTTS(),
+    )
+    result = router.handle(
+        f"{student_name}, explain quantum entanglement.", session_id="ability-sequence",
+    )
+    assert [r.action for r in result.responses] == expected_actions
+    assert all(r.persona_id == student_id for r in result.responses)
+    assert all(not r.speak and not r.dialogue and r.audio_url is None for r in result.responses[:-1])
+    assert result.responses[-1].speak and result.responses[-1].audio_url
+    assert models.generate_content.call_count == int(selected != "idk")
+    memory = router.registry.get_conversation_memory("ability-sequence", student_id)
+    assert len(memory["recent_turns"]) == 2
+
+
+def test_idk_does_not_add_unsupported_thinking_for_maria_or_robert():
+    from unittest.mock import Mock
+
+    for name, student_id in (("Maria", "maria-sandoval"), ("Robert", "robert-eco")):
+        behavior = Mock()
+        behavior.latency_status.return_value = {}
+        behavior.generate_reply.return_value = BehaviorResponse(
+            persona_id=student_id, dialogue="I'm not sure, Ma'am.",
+            emotion="uncertain", action="IDK", speak=True,
+        )
+        result = MicrophoneCommandRouter(behavior=behavior, tts=FakeTTS()).handle(
+            f"{name}, explain quantum entanglement.", session_id="unsupported-thinking",
+        )
+        assert [r.action for r in result.responses] == ["NONE"]
 class FakeBehavior:
     def __init__(self):
         self.inputs = []
@@ -325,10 +418,11 @@ def test_unknowable_personal_questions_are_deterministic_idk_for_intermediate_st
                 session_id=f"unknowable-{student_id}-{index}",
             )
             assert result.target == student_id
-            assert [response.action for response in result.responses] == ["IDK"]
-            assert result.responses[0].speak is True
-            assert result.responses[0].dialogue
-            assert result.responses[0].audio_url is not None
+            assert [response.action for response in result.responses] == ["THINKING", "IDK"]
+            assert result.responses[0].speak is False
+            assert result.responses[-1].speak is True
+            assert result.responses[-1].dialogue
+            assert result.responses[-1].audio_url is not None
 
 
 def test_derive_question_is_not_misclassified_as_clarification():
@@ -357,8 +451,8 @@ def test_derive_question_is_not_misclassified_as_clarification():
     )
 
     assert result.target == "ethan-luna"
-    assert result.responses[0].dialogue != "Sorry, I did not understand. Could you please repeat that?"
-    assert result.responses[0].speak is True
+    assert result.responses[-1].dialogue != "Sorry, I did not understand. Could you please repeat that?"
+    assert result.responses[-1].speak is True
 
 
 def test_francis_aliases_posture_and_session_grade_sequence():

@@ -191,6 +191,20 @@ class MicrophoneCommandRouter:
                     else "NONE"
                 )
                 reply = reply.model_copy(update={"action": final_action})
+            elif (
+                reply.action == "IDK"
+                and reply.speak
+                and reply.dialogue
+                and "THINKING" in student.supported_actions
+            ):
+                # Direct academic/LLM IDK replies need the same preparation
+                # event as uncertainty reached through the THINKING branch.
+                thinking_response = reply.model_copy(update={
+                    "dialogue": "",
+                    "speak": False,
+                    "audio_url": None,
+                    "action": "THINKING",
+                })
             behavior_latency = getattr(self.behavior, "latency_status", lambda: {})()
             for stage in ("llm_generation", "academic_selection", "ai_api", "ai_calls"):
                 if behavior_latency.get(stage) is not None:
