@@ -121,3 +121,80 @@ def test_session_creation_stores_scenario_configuration(client):
     assert response.status_code == 201
     assert response.json()["class_size"] == 20
     assert response.json()["status"] == "created"
+
+
+def test_session_creation_stores_teaching_setup_configuration(client):
+    http, _ = client
+
+    response = http.post(
+        "/api/v1/sessions",
+        json={
+            "trainee_id": 1,
+            "grade": "High School",
+            "subject": "Science",
+            "topic": "Ecosystems",
+            "session_mode": "assessment",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["grade"] == "High School"
+    assert response.json()["subject"] == "Science"
+    assert response.json()["topic"] == "Ecosystems"
+    assert response.json()["session_mode"] == "assessment"
+
+
+def test_session_history_includes_teaching_setup_configuration(client):
+    http, _ = client
+
+    created = http.post(
+        "/api/v1/sessions",
+        json={
+            "trainee_id": 1,
+            "grade": "College",
+            "subject": "Education",
+            "topic": "Lesson planning",
+            "session_mode": "practice",
+        },
+    )
+    assert created.status_code == 201
+
+    history = http.get("/api/v1/trainees/1/history")
+
+    assert history.status_code == 200
+    item = next(row for row in history.json() if row["session_id"] == created.json()["session_id"])
+    assert item["subject"] == "Education"
+    assert item["topic"] == "Lesson planning"
+    assert item["session_mode"] == "practice"
+
+
+def test_session_creation_rejects_topic_from_another_subject(client):
+    http, _ = client
+
+    response = http.post(
+        "/api/v1/sessions",
+        json={
+            "trainee_id": 1,
+            "grade": "High School",
+            "subject": "Science",
+            "topic": "Linear equations",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_session_creation_rejects_subject_outside_grade_level(client):
+    http, _ = client
+
+    response = http.post(
+        "/api/v1/sessions",
+        json={
+            "trainee_id": 1,
+            "grade": "Elementary",
+            "subject": "Practical Research",
+            "topic": "Research problem",
+        },
+    )
+
+    assert response.status_code == 422
