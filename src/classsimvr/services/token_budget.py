@@ -68,9 +68,12 @@ class TokenBudget:
         session_summary: str,
         recent_turns: list[dict[str, str]],
         knowledge_level: str = "INTERMEDIATE",
+        grade_level: str | None = None,
         confidence: float = 0.6,
         willingness: float = 0.5,
         supported_actions: list[str] | None = None,
+        academic_difficulty: str | None = None,
+        academic_behavior: str | None = None,
     ) -> dict[str, Any]:
         fixed = {
             "persona_id": persona_id,
@@ -81,6 +84,12 @@ class TokenBudget:
             "confidence": confidence,
             "willingness": willingness,
         }
+        # An omitted selection is explicit; never let the model infer College.
+        fixed["grade_level"] = grade_level or "UNSELECTED"
+        if academic_difficulty:
+            fixed["academic_difficulty"] = academic_difficulty
+        if academic_behavior:
+            fixed["academic_behavior"] = academic_behavior
         if supported_actions is not None:
             fixed["supported_actions"] = list(supported_actions)
         context_budget = max(

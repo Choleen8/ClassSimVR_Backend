@@ -1,0 +1,3 @@
+# Optional CUDA 12 runtime for the tested Windows Whisper configuration.
+-r requirements.txt
+nvidia-cublas-cu12==12.4.5.8 ; sys_platform == "win32" and platform_machine == "AMD64"

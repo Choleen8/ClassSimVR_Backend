@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 class MicrophoneContextBody(BaseModel):
     session_id: str = Field(default="classroom", min_length=1, max_length=128)
+    selected_grade_level: str | None = Field(default=None, max_length=20)
     scene_state: str = Field(default="", max_length=12000)
     session_summary: str = Field(default="", max_length=12000)
     recent_turns: list[dict[str, str]] = Field(default_factory=list, max_length=30)
@@ -66,7 +67,7 @@ class ListeningCoordinator:
         self._queues: dict[str, deque[MicrophoneStopResponse]] = defaultdict(
             lambda: deque(maxlen=100)
         )
-        self._queue_enqueued_at: dict[str, deque[float]] = defaultdict(
+        self._queue_enqueued_at: dict[str, deque[tuple[float, str | None, float | None]]] = defaultdict(
             lambda: deque(maxlen=100)
         )
         self._last_error: str | None = None
@@ -81,13 +82,23 @@ class ListeningCoordinator:
         self._last_command_id: str | None = None
         self._duplicate_commands_dropped = 0
         self._stale_commands_dropped = 0
-        self.listener = VoiceListeningService(on_transcription=self._on_transcription)
+        self.listener = VoiceListeningService(
+            on_transcription=self._on_transcription,
+            student_names=tuple(student.name for student in self.router.registry.list_students()),
+        )
 
     def start(self, body: MicrophoneStartBody | None = None) -> dict:
         request = body or MicrophoneStartBody()
         with self._lifecycle_lock:
+            selected_grade_level = self.router.registry.set_selected_grade_level(
+                request.session_id, request.selected_grade_level
+            )
+            request = request.model_copy(update={"selected_grade_level": selected_grade_level})
             if request.reset_memory:
                 self.router.registry.reset_session(request.session_id)
+            self.listener.set_student_names(
+                tuple(student.name for student in self.router.registry.list_students())
+            )
             with self._lock:
                 self._generation += 1
                 self._context = MicrophoneContextBody.model_validate(request.model_dump())
@@ -147,6 +158,9 @@ class ListeningCoordinator:
         status = self.listener.status()
         with self._lock:
             status["queued_responses"] = sum(len(queue) for queue in self._queues.values())
+            status["selected_grade_level"] = self.router.registry.get_selected_grade_level(
+                self._context.session_id
+            )
             status["last_error"] = self._last_error
             status["transcriptions_received"] = self._transcriptions_received
             status["routes_completed"] = self._routes_completed
@@ -177,16 +191,19 @@ class ListeningCoordinator:
                     target="classroom",
                     responses=expired_hand_responses,
                 ))
-                self._queue_enqueued_at[session_id].append(time.perf_counter())
+                self._queue_enqueued_at[session_id].append((time.perf_counter(), None, None))
             if drain:
                 items = []
                 for _ in range(min(limit, len(response_queue))):
                     items.append(response_queue.popleft())
                     if self._queue_enqueued_at[session_id]:
-                        enqueued_at = self._queue_enqueued_at[session_id].popleft()
-                        self._set_router_latency("response_delivery", round(
-                            (time.perf_counter() - enqueued_at) * 1000, 2
-                        ))
+                        enqueued_at, command_id, last_speech_at = self._queue_enqueued_at[session_id].popleft()
+                        now = time.perf_counter()
+                        delivery_ms = round((now - enqueued_at) * 1000, 2)
+                        self._set_router_latency("response_delivery", delivery_ms)
+                        logger.info("Response drained command_id=%s session=%s queue_to_poll_ms=%s speech_to_poll_ms=%s",
+                                    command_id, session_id, delivery_ms,
+                                    round((now - last_speech_at) * 1000, 2) if last_speech_at is not None else None)
                 return items
             return list(response_queue)[:limit]
 
@@ -222,7 +239,9 @@ class ListeningCoordinator:
             context.session_id,
             transcript,
         )
-        speech_end_at = getattr(self.listener, "_last_utterance_end_at", None)
+        speech_end_at, capture_stages = getattr(
+            self.listener, "current_command_timing", lambda: (None, {})
+        )()
         end_to_end_started = speech_end_at or time.perf_counter()
         try:
             result = self.router.handle(
@@ -232,6 +251,7 @@ class ListeningCoordinator:
                 session_summary=context.session_summary,
                 recent_turns=context.recent_turns,
                 default_persona_id=context.default_persona_id,
+                selected_grade_level=context.selected_grade_level,
             )
             item = MicrophoneStopResponse(
                 transcript=transcript,
@@ -253,7 +273,7 @@ class ListeningCoordinator:
                     return
                 self._executed_command_ids.add(command_id)
                 self._queues[context.session_id].append(item)
-                self._queue_enqueued_at[context.session_id].append(time.perf_counter())
+                self._queue_enqueued_at[context.session_id].append((time.perf_counter(), command_id, speech_end_at))
                 self._routes_completed += 1
                 self._last_response_queue_ms = round(
                     (time.perf_counter() - queue_started) * 1000, 2
@@ -276,7 +296,7 @@ class ListeningCoordinator:
                 command_id,
                 context.session_id,
                 {
-                    **self.listener.status().get("latency_ms", {}),
+                    **capture_stages,
                     **self.router.latency_status(),
                 },
                 total_response_ms,

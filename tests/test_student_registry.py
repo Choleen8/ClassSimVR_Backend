@@ -21,6 +21,31 @@ def make_student(index: int) -> StudentProfile:
     )
 
 
+@pytest.mark.parametrize("student_id,name,voice", [
+    ("dave-santos", "Dave Santos", "en-US-AndrewNeural"),
+    ("juan-cruz", "Juan Cruz", "en-US-BrianNeural"),
+])
+def test_new_male_students_have_independent_profiles_and_session_memory(student_id, name, voice):
+    registry = StudentRegistry.with_defaults()
+    student = registry.get(student_id)
+    assert student.name == name and student.gender == "male"
+    assert student.knowledge_level == "INTERMEDIATE"
+    assert student.voice == voice
+    assert all(other.voice != voice for other in registry.list_students() if other.student_id != student_id)
+    assert {"SIT", "STAND", "RAISE_HAND", "LOWER_HAND", "TALK", "THINKING", "IDK", "NONE"} <= set(student.supported_actions)
+    for alias in (name, name.split()[0], name.upper(), f"  {name.split()[0]}!  "):
+        assert registry.resolve(alias).student_id == student_id
+    assert registry.get_selected_grade_level("test-class") is None
+    registry.set_selected_grade_level("test-class", "Grade 8")
+    assert registry.get_selected_grade_level("test-class") == "Grade 8"
+    registry.record_conversation_turn("test-class", student_id, "Introduce yourself.", f"I am {name}.")
+    assert registry.get_conversation_memory("test-class", student_id)["first_teacher_question"] == "Introduce yourself."
+    for other in registry.list_students():
+        if other.student_id != student_id:
+            assert not registry.get_conversation_memory("test-class", other.student_id)["recent_turns"]
+    assert not registry.get_conversation_memory("another-class", student_id)["recent_turns"]
+
+
 def test_registry_registers_unique_profiles_and_resolves_aliases():
     registry = StudentRegistry()
     profile = make_student(1)
@@ -40,6 +65,7 @@ def test_default_registry_includes_ethan_luna_with_shared_male_voice_and_capabil
     assert {registry.resolve(alias).student_id for alias in ("Ethan", "Ethan Luna")} == {"ethan-luna"}
     assert ethan.voice == registry.get("robert-eco").voice
     assert ethan.knowledge_level == "INTERMEDIATE"
+    assert not hasattr(ethan, "grade_level")
     assert ethan.confidence == 0.6
     assert ethan.willingness == 0.6
     assert "THINKING" in ethan.supported_actions
@@ -47,6 +73,58 @@ def test_default_registry_includes_ethan_luna_with_shared_male_voice_and_capabil
     assert "THINKING" not in registry.get("maria-sandoval").supported_actions
     assert registry.get("maria-sandoval").knowledge_level == "ADVANCED"
     assert registry.get("robert-eco").knowledge_level == "ADVANCED"
+
+
+def test_default_registry_includes_andrea_with_distinct_female_voice_and_capabilities():
+    registry = StudentRegistry.with_defaults()
+
+    andrea = registry.get("andrea-guinto")
+
+    assert andrea.name == "Andrea Guinto"
+    assert andrea.gender == "female"
+    assert andrea.voice
+    assert andrea.voice != registry.get("maria-sandoval").voice
+    assert andrea.knowledge_level == "INTERMEDIATE"
+    assert not hasattr(andrea, "grade_level")
+    assert "THINKING" in andrea.supported_actions
+    assert "IDK" in andrea.supported_actions
+
+
+def test_default_registry_includes_judy_as_beginner_female_student():
+    registry = StudentRegistry.with_defaults()
+
+    judy = registry.get("judy-castillo")
+
+    assert judy.name == "Judy Castillo"
+    assert judy.gender == "female"
+    assert judy.voice == "en-US-AriaNeural"
+    assert judy.knowledge_level == "BEGINNER"
+    assert not hasattr(judy, "grade_level")
+    assert "THINKING" in judy.supported_actions
+    assert "IDK" in judy.supported_actions
+
+
+@pytest.mark.parametrize("spoken_name", ["Judy", "Judi", "Judy Castillo", "جودي", "جو دی"])
+def test_default_registry_resolves_judy_aliases(spoken_name):
+    registry = StudentRegistry.with_defaults()
+
+    assert registry.resolve(f"{spoken_name}, please stand up").student_id == "judy-castillo"
+
+
+@pytest.mark.parametrize("spoken_name", ["Andrea", "Andreya", "Andria", "Andreah", "Andrea Guinto"])
+def test_default_registry_resolves_andrea_aliases(spoken_name):
+    registry = StudentRegistry.with_defaults()
+
+    assert registry.resolve(f"{spoken_name}, please stand up").student_id == "andrea-guinto"
+
+
+@pytest.mark.parametrize("spoken_name", [
+    "Ethan", "Ethan Luna", "Etan", "Itan", "Eitan", "Ethen", "Eithan", "Eton",
+])
+def test_default_registry_resolves_ethan_speech_name_variants(spoken_name):
+    registry = StudentRegistry.with_defaults()
+
+    assert registry.resolve(f"{spoken_name}, what number I'm thinking right now?").student_id == "ethan-luna"
 
 
 def test_registry_normalizes_configured_knowledge_levels():
@@ -64,6 +142,16 @@ def test_registry_normalizes_configured_knowledge_levels():
 
     assert registry.get("student-1").knowledge_level == "BEGINNER"
     assert registry.get("student-2").knowledge_level == "INTERMEDIATE"
+
+
+def test_registry_stores_selected_grade_per_classroom_session():
+    registry = StudentRegistry()
+    assert registry.get_selected_grade_level("classroom") is None
+
+    registry.set_selected_grade_level("classroom", "8")
+
+    assert registry.get_selected_grade_level("classroom") == "Grade 8"
+    assert registry.get_selected_grade_level("other-classroom") is None
 
 
 def test_registry_loads_configuration_and_keeps_per_session_state():
@@ -145,7 +233,7 @@ def test_legacy_berto_id_is_migrated_without_creating_duplicate_student():
 
     assert [profile.student_id for profile in loaded] == ["robert-eco"]
     assert [profile.student_id for profile in registry.list_students()].count("robert-eco") == 1
-    assert len(registry.list_students()) == 3
+    assert len(registry.list_students()) == 8
 
 
 def test_registry_keeps_chronological_conversation_memory_per_student_and_session():

@@ -74,7 +74,8 @@ def test_transcriber_type_error_is_not_retried_as_signature_fallback():
     assert "internal transcription failure" in service.status()["last_transcription_error"]
 
 
-def test_warmup_loads_whisper_model_once_and_reports_device():
+def test_warmup_loads_whisper_model_once_and_reports_device(monkeypatch):
+    monkeypatch.setenv("WHISPER_DEVICE", "cpu")
     service = SpeechToTextService()
     model = object()
     calls = []
@@ -92,6 +93,28 @@ def test_warmup_loads_whisper_model_once_and_reports_device():
     diagnostics = service.diagnostics()
     assert diagnostics["model_loaded"] is True
     assert diagnostics["device"] == "cpu"
+
+
+def test_auto_gpu_memory_failure_replays_same_utterance_on_cpu(monkeypatch):
+    monkeypatch.setenv("WHISPER_DEVICE", "auto")
+    service = SpeechToTextService()
+    gpu, cpu = object(), object()
+    service._model = gpu
+    service.device = "cuda"
+    monkeypatch.setattr(service, "_get_model", lambda: service._model or cpu)
+    calls = []
+
+    def recognize(model, samples):
+        calls.append((model, samples))
+        if model is gpu:
+            raise RuntimeError("CUDA out of memory")
+        return "Robert, umupo ka na."
+
+    monkeypatch.setattr(service, "_recognize", recognize)
+    assert service.transcribe(bytes(640)) == "Robert, umupo ka na."
+    assert [model for model, _ in calls] == [gpu, cpu]
+    assert calls[0][1] is calls[1][1]
+    assert service.device == "cpu" and service.compute_type == "int8"
 
 
 def test_indonesian_language_detection_retries_with_tagalog(monkeypatch):
@@ -119,3 +142,49 @@ def test_indonesian_language_detection_retries_with_tagalog(monkeypatch):
     assert service.transcribe(audio) == "Maria tumayo"
     assert calls[0]["language"] is None
     assert calls[1]["language"] == "tl"
+
+
+def test_initial_prompt_contains_all_registered_student_names():
+    captured = {}
+
+    class Model:
+        def transcribe(self, audio, **kwargs):
+            captured.update(kwargs)
+            return iter([]), type("Info", (), {"language": "en"})()
+
+    service = SpeechToTextService(student_names=(
+        "Maria Sandoval", "Robert Eco", "Ethan Luna", "Andrea Guinto", "Judy Castillo",
+        "Francis Reyes", "Dave Santos", "Juan Cruz",
+    ))
+    service._get_model = lambda: Model()
+    service.transcribe(b"\x00" * 64)
+
+    prompt = captured["initial_prompt"]
+    for name in ("Maria Sandoval", "Robert Eco", "Ethan Luna", "Andrea Guinto", "Judy Castillo", "Dave Santos", "Juan Cruz"):
+        assert name in prompt
+    assert "First-name calls include Maria, Robert, Ethan, Andrea, Judy, Francis, Dave, Juan." in prompt
+
+
+def test_short_arabic_script_name_retries_with_tagalog_hint(monkeypatch):
+    calls = []
+
+    class Segment:
+        def __init__(self, text):
+            self.text = text
+
+    class Info:
+        def __init__(self, language):
+            self.language = language
+
+    class Model:
+        def transcribe(self, audio, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return iter([Segment("جودي")]), Info("ar")
+            return iter([Segment("Judy")]), Info("tl")
+
+    service = SpeechToTextService(student_names=("Judy Castillo",))
+    monkeypatch.setattr(service, "_get_model", lambda: Model())
+
+    assert service.transcribe(b"\x00" * 64) == "Judy"
+    assert [call["language"] for call in calls] == [None, "tl"]

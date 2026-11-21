@@ -49,7 +49,6 @@ class SileroSpeechGate:
             logger.info("Silero VAD unavailable; using adaptive RMS fallback: %s", error)
 
     def speech_probability(self, audio_bytes: bytes, sample_rate: int) -> float | None:
-        self.warmup()
         if not self.available or self.model is None:
             return None
         try:
@@ -299,10 +298,11 @@ class VoiceListeningService:
         on_transcription: Callable[[str], None] | None = None,
         device_name: str = DEFAULT_MICROPHONE_DEVICE,
         vad: VoiceActivityDetector | None = None,
+        student_names: tuple[str, ...] | None = None,
     ) -> None:
         self.device_name = device_name
         self._recorder_factory = recorder_factory or (lambda device: SoundDeviceRecorder(device))
-        self._transcriber = transcriber or SpeechToTextService()
+        self._transcriber = transcriber or SpeechToTextService(student_names=student_names)
         self._on_transcription = on_transcription
         self._vad = vad or VoiceActivityDetector()
         self._sample_rate = int(getattr(self._vad, "sample_rate", 48_000))
@@ -313,7 +313,8 @@ class VoiceListeningService:
         self._active_device: str | None = None
         self._started_at: float | None = None
         self._recorder: MicrophoneRecorder | None = None
-        self._utterances: queue.Queue[tuple[bytes, float] | None] = queue.Queue(maxsize=8)
+        self._utterances: queue.Queue[tuple[bytes, float, float | None, float] | None] = queue.Queue(maxsize=8)
+        self._command_timing = threading.local()
         self._worker: threading.Thread | None = None
         self._stop_worker = False
         self._error: str | None = None
@@ -335,6 +336,11 @@ class VoiceListeningService:
         self._last_queue_wait_ms: float | None = None
         self._last_utterance_end_at: float | None = None
         self._last_non_silent_at: float | None = None
+
+    def set_student_names(self, student_names: tuple[str, ...]) -> None:
+        setter = getattr(self._transcriber, "set_student_names", None)
+        if setter is not None:
+            setter(student_names)
 
     def start(self, device_name: str | None = None) -> dict:
         with self._lock:
@@ -531,17 +537,17 @@ class VoiceListeningService:
                 return
             self._captured_chunks += 1
             self._captured_bytes += len(audio_bytes)
-        rms, peak = self._vad._levels(audio_bytes)
-        with self._lock:
-            self._last_rms = rms
-            self._peak_volume = max(self._peak_volume, peak)
-            if rms >= self._vad._hold_threshold():
-                self._non_silent_frames += 1
             was_active = self._vad.speech_active
+            hold_threshold = self._vad._hold_threshold()
         vad_started = time.perf_counter()
         utterances = self._vad.process(audio_bytes)
         self._last_vad_ms = round((time.perf_counter() - vad_started) * 1000, 2)
         with self._lock:
+            rms, peak = self._vad.last_rms, self._vad.last_peak
+            self._last_rms = rms
+            self._peak_volume = max(self._peak_volume, peak)
+            if rms >= hold_threshold:
+                self._non_silent_frames += 1
             if self._vad.last_speech_detected:
                 self._last_non_silent_at = time.perf_counter()
             is_active = self._vad.speech_active
@@ -560,13 +566,13 @@ class VoiceListeningService:
                         max(0.0, utterance_end - self._last_non_silent_at) * 1000, 2
                     )
             logger.info("VAD completed utterance bytes=%s sample_rate=%s", len(utterance), self._sample_rate)
-            self._enqueue(utterance)
+            self._enqueue(utterance, self._last_non_silent_at, self._last_vad_ms)
 
-    def _enqueue(self, audio_bytes: bytes) -> None:
+    def _enqueue(self, audio_bytes: bytes, last_speech_at: float | None = None, vad_ms: float = 0.0) -> None:
         if not audio_bytes:
             return
         try:
-            self._utterances.put_nowait((audio_bytes, time.perf_counter()))
+            self._utterances.put_nowait((audio_bytes, time.perf_counter(), last_speech_at, vad_ms))
         except queue.Full:
             with self._lock:
                 self._dropped_utterances += 1
@@ -578,8 +584,14 @@ class VoiceListeningService:
             try:
                 if item is None:
                     return
-                audio_bytes, queued_at = item
+                audio_bytes, queued_at, last_speech_at, vad_ms = item
                 self._last_queue_wait_ms = round((time.perf_counter() - queued_at) * 1000, 2)
+                self._command_timing.speech_at = last_speech_at
+                self._command_timing.stages = {
+                    "vad": vad_ms,
+                    "end_of_speech": round((queued_at - last_speech_at) * 1000, 2) if last_speech_at is not None else None,
+                    "utterance_queue_wait": self._last_queue_wait_ms,
+                }
                 try:
                     text = self._transcribe(audio_bytes).strip()
                     with self._lock:
@@ -596,6 +608,14 @@ class VoiceListeningService:
                     logger.exception("Transcription failed")
             finally:
                 self._utterances.task_done()
+
+    def current_command_timing(self) -> tuple[float | None, dict]:
+        diagnostics = self._transcriber_diagnostics()
+        return getattr(self._command_timing, "speech_at", None), {
+            **getattr(self._command_timing, "stages", {}),
+            "audio_preprocessing": diagnostics.get("last_preprocessing_ms"),
+            "whisper_transcription": diagnostics.get("last_transcription_ms"),
+        }
 
     def _transcribe(self, audio_bytes: bytes) -> str:
         transcribe = self._transcriber.transcribe

@@ -31,6 +31,34 @@ class FakeManager:
         return {"state": "idle"}
 
 
+def test_francis_thinking_and_spoken_idk_reach_poll_queue_in_order():
+    from unittest.mock import Mock
+    from classsimvr.services.behavior import BehaviorService
+    from classsimvr.services.microphone_commands import MicrophoneCommandRouter
+
+    coordinator = ListeningCoordinator()
+    tts = Mock()
+    tts.synthesize.return_value = "http://localhost/audio/francis.mp3"
+    coordinator.router = MicrophoneCommandRouter(
+        behavior=BehaviorService(client=object()), tts=tts,
+    )
+    try:
+        coordinator._on_transcription("Francis, what number am I thinking of?")
+        items = coordinator.poll("classroom", limit=10, drain=True)
+        assert len(items) == 1
+        item = items[0]
+        assert item.target == "francis-reyes"
+        assert [(r.persona_id, r.action, r.speak) for r in item.responses] == [
+            ("francis-reyes", "THINKING", False), ("francis-reyes", "IDK", True),
+        ]
+        assert item.responses[0].audio_url is None
+        assert item.responses[1].audio_url == tts.synthesize.return_value
+        assert coordinator.poll("classroom", limit=10, drain=True) == []
+        tts.synthesize.assert_called_once()
+    finally:
+        coordinator.shutdown()
+
+
 def test_microphone_start_status_and_cancel_handlers():
     manager = FakeManager()
     assert start_microphone(MicrophoneStartBody(), manager)["state"] == "recording"
@@ -118,6 +146,9 @@ def test_start_clears_pending_responses_from_previous_listening_session():
     coordinator = ListeningCoordinator()
 
     class FakeListener:
+        def set_student_names(self, names):
+            self.names = names
+
         def start(self, device_name=None):
             return {"state": "listening", "device": device_name}
 
@@ -137,6 +168,7 @@ def test_start_clears_pending_responses_from_previous_listening_session():
 
     coordinator.start(MicrophoneStartBody(session_id="classroom"))
 
+    assert "Francis Reyes" in coordinator.listener.names
     assert coordinator.poll("classroom", limit=10, drain=False) == []
     coordinator.shutdown()
 
@@ -167,6 +199,9 @@ def test_repeated_start_stop_invalidates_previous_generation_safely():
         def __init__(self):
             self.starts = 0
             self.stops = 0
+
+        def set_student_names(self, names):
+            self.names = names
 
         def start(self, device_name=None):
             self.starts += 1

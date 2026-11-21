@@ -23,6 +23,10 @@ class BehaviorRequest(BaseModel):
     name_only_address: bool = False
     acknowledgment_required: bool = True
     knowledge_level: str = Field(default="INTERMEDIATE", max_length=20)
+    grade_level: str | None = Field(default=None, max_length=20)
+    academic_difficulty: str | None = Field(default=None, max_length=20)
+    academic_behavior: str | None = Field(default=None, max_length=20)
+    academic_behavior_enabled: bool = False
     confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     willingness: float = Field(default=0.5, ge=0.0, le=1.0)
     supported_actions: list[str] = Field(default_factory=lambda: [
