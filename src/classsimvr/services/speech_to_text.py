@@ -125,13 +125,14 @@ class SpeechToTextService:
         return " ".join(segment.text.strip() for segment in segments).strip(), info
 
     def _initial_prompt(self) -> str:
-        names = ", ".join(self._student_names)
-        if not names:
-            names = ", ".join(student.name for student in DEFAULT_STUDENT_PROFILES)
+        full_names = self._student_names or tuple(student.name for student in DEFAULT_STUDENT_PROFILES)
+        names = ", ".join(full_names)
+        first_names = ", ".join(dict.fromkeys(name.split()[0] for name in full_names))
         return (
             "Classroom speech in English, Filipino, Tagalog, or Taglish. "
             "Recognize short student names exactly as spoken. Student names include "
-            f"{names}."
+            f"{names}. First-name calls include {first_names}. "
+            "Preserve the spoken names and distinguish them from ordinary numbers using context."
         )
 
     def _get_model(self):

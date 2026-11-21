@@ -154,13 +154,15 @@ def test_initial_prompt_contains_all_registered_student_names():
 
     service = SpeechToTextService(student_names=(
         "Maria Sandoval", "Robert Eco", "Ethan Luna", "Andrea Guinto", "Judy Castillo",
+        "Francis Reyes", "Dave Santos", "Juan Cruz",
     ))
     service._get_model = lambda: Model()
     service.transcribe(b"\x00" * 64)
 
     prompt = captured["initial_prompt"]
-    for name in ("Maria Sandoval", "Robert Eco", "Ethan Luna", "Andrea Guinto", "Judy Castillo"):
+    for name in ("Maria Sandoval", "Robert Eco", "Ethan Luna", "Andrea Guinto", "Judy Castillo", "Dave Santos", "Juan Cruz"):
         assert name in prompt
+    assert "First-name calls include Maria, Robert, Ethan, Andrea, Judy, Francis, Dave, Juan." in prompt
 
 
 def test_short_arabic_script_name_retries_with_tagalog_hint(monkeypatch):

@@ -21,6 +21,31 @@ def make_student(index: int) -> StudentProfile:
     )
 
 
+@pytest.mark.parametrize("student_id,name,voice", [
+    ("dave-santos", "Dave Santos", "en-US-AndrewNeural"),
+    ("juan-cruz", "Juan Cruz", "en-US-BrianNeural"),
+])
+def test_new_male_students_have_independent_profiles_and_session_memory(student_id, name, voice):
+    registry = StudentRegistry.with_defaults()
+    student = registry.get(student_id)
+    assert student.name == name and student.gender == "male"
+    assert student.knowledge_level == "INTERMEDIATE"
+    assert student.voice == voice
+    assert all(other.voice != voice for other in registry.list_students() if other.student_id != student_id)
+    assert {"SIT", "STAND", "RAISE_HAND", "LOWER_HAND", "TALK", "THINKING", "IDK", "NONE"} <= set(student.supported_actions)
+    for alias in (name, name.split()[0], name.upper(), f"  {name.split()[0]}!  "):
+        assert registry.resolve(alias).student_id == student_id
+    assert registry.get_selected_grade_level("test-class") is None
+    registry.set_selected_grade_level("test-class", "Grade 8")
+    assert registry.get_selected_grade_level("test-class") == "Grade 8"
+    registry.record_conversation_turn("test-class", student_id, "Introduce yourself.", f"I am {name}.")
+    assert registry.get_conversation_memory("test-class", student_id)["first_teacher_question"] == "Introduce yourself."
+    for other in registry.list_students():
+        if other.student_id != student_id:
+            assert not registry.get_conversation_memory("test-class", other.student_id)["recent_turns"]
+    assert not registry.get_conversation_memory("another-class", student_id)["recent_turns"]
+
+
 def test_registry_registers_unique_profiles_and_resolves_aliases():
     registry = StudentRegistry()
     profile = make_student(1)
@@ -208,7 +233,7 @@ def test_legacy_berto_id_is_migrated_without_creating_duplicate_student():
 
     assert [profile.student_id for profile in loaded] == ["robert-eco"]
     assert [profile.student_id for profile in registry.list_students()].count("robert-eco") == 1
-    assert len(registry.list_students()) == 6
+    assert len(registry.list_students()) == 8
 
 
 def test_registry_keeps_chronological_conversation_memory_per_student_and_session():

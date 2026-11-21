@@ -9,6 +9,8 @@ from classsimvr.services.student_registry import StudentProfile, StudentRegistry
     ("Francis", "francis-reyes"),
     ("Ethan", "ethan-luna"),
     ("Judy", "judy-castillo"),
+    ("Dave", "dave-santos"),
+    ("Juan", "juan-cruz"),
 ])
 def test_spoken_idk_has_one_silent_thinking_prelude(student_name, student_id):
     from unittest.mock import Mock
@@ -41,6 +43,7 @@ def test_spoken_idk_has_one_silent_thinking_prelude(student_name, student_id):
 
 @pytest.mark.parametrize("student_name,student_id", [
     ("Francis", "francis-reyes"), ("Ethan", "ethan-luna"),
+    ("Dave", "dave-santos"), ("Juan", "juan-cruz"),
 ])
 @pytest.mark.parametrize("selected,expected_actions", [
     ("answer", ["NONE"]),
@@ -119,6 +122,82 @@ class FakeBehavior:
 class FakeTTS:
     def synthesize(self, *args, **kwargs):
         return "http://127.0.0.1:8000/audio/test.mp3"
+
+
+@pytest.mark.parametrize("alias", [
+    "Juan", "Juan Cruz", "Jun", "Jun Cruz", "Juwan", "Juwan Cruz", "Huan",
+    "Huan Cruz", "One Cruz",
+])
+def test_juan_speech_variants_route_to_one_canonical_actor(alias):
+    router = MicrophoneCommandRouter(behavior=BehaviorService(client=object()), tts=FakeTTS())
+    called = router.handle(alias + "!", session_id="juan-alias")
+    assert called.target == "juan-cruz"
+    reply, = called.responses
+    assert reply.persona_id == "juan-cruz"
+    assert (reply.action, reply.dialogue, reply.speak) == ("NONE", "Yes, Ma'am!", True)
+    assert reply.audio_url
+    seated = router.handle(f"{alias}, please sit down.", session_id="juan-alias")
+    assert [(r.persona_id, r.action) for r in seated.responses] == [("juan-cruz", "SIT")]
+
+
+@pytest.mark.parametrize("text", ["One.", "One plus one.", "One, please sit down.", "I spoke to Jun yesterday."])
+def test_juan_number_confusions_and_incidental_mentions_do_not_target_a_student(text):
+    router = MicrophoneCommandRouter(behavior=BehaviorService(client=object()), tts=FakeTTS())
+    result = router.handle(text, session_id="safe-juan")
+    assert result.target == "none" and result.responses == []
+
+
+@pytest.mark.parametrize("name,student_id", [
+    ("Dave Santos", "dave-santos"), ("Juan Cruz", "juan-cruz"),
+])
+def test_new_students_acknowledge_names_and_follow_individual_commands(name, student_id):
+    from unittest.mock import Mock
+
+    tts = Mock(spec=FakeTTS)
+    tts.synthesize.return_value = "http://localhost/audio/test.mp3"
+    router = MicrophoneCommandRouter(behavior=BehaviorService(client=object()), tts=tts)
+    router.registry.set_selected_grade_level("new-students", "Grade 8")
+    for alias in (name, name.split()[0]):
+        for text, action in (
+            (f"{alias}!", "NONE"),
+            (f"{alias}, please stand up.", "STAND"),
+            (f"Umupo ka na, {alias}.", "SIT"),
+        ):
+            result = router.handle(text, session_id="new-students")
+            assert result.target == student_id
+            reply, = result.responses
+            assert reply.persona_id == student_id and reply.action == action
+            assert reply.speak and reply.audio_url == tts.synthesize.return_value
+            if action == "NONE":
+                assert reply.dialogue == "Yes, Ma'am!"
+            assert tts.synthesize.call_args.kwargs["voice"] == router.registry.get(student_id).voice
+    assert router.registry.get_selected_grade_level("new-students") == "Grade 8"
+    result = router.handle(f"{name}, explain quantum field theory.", session_id="new-students")
+    assert [(r.action, r.speak) for r in result.responses] == [("THINKING", False), ("IDK", True)]
+
+
+def test_dave_and_juan_volunteer_and_lower_hands_through_shared_group_routing():
+    from unittest.mock import Mock
+
+    behavior = Mock()
+    behavior.latency_status.return_value = {}
+    behavior.decide_classroom_volunteers.return_value = {
+        "dave-santos": "RAISE_HAND", "juan-cruz": "RAISE_HAND",
+    }
+    router = MicrophoneCommandRouter(behavior=behavior, tts=FakeTTS())
+    result = router.handle("Who wants to answer?", session_id="new-volunteers")
+    assert [(r.persona_id, r.action, r.speak) for r in result.responses] == [
+        ("dave-santos", "RAISE_HAND", False), ("juan-cruz", "RAISE_HAND", False),
+    ]
+    behavior.decide_classroom_volunteers.assert_called_once()
+    behavior.generate_reply.return_value = BehaviorResponse(
+        persona_id="juan-cruz", dialogue="Yes, Ma'am!", action="NONE",
+        emotion="respectful", speak=True,
+    )
+    result = router.handle("Juan", session_id="new-volunteers")
+    assert [(r.persona_id, r.action) for r in result.responses] == [
+        ("dave-santos", "LOWER_HAND"), ("juan-cruz", "LOWER_HAND"), ("juan-cruz", "NONE"),
+    ]
 
 
 def test_routes_named_student_to_maria():
@@ -512,7 +591,8 @@ def test_routes_everyone_to_all_default_students():
     result = router.handle("Everyone, please sit down.", session_id="classroom")
 
     assert [item.persona_id for item in result.responses] == [
-        "maria-sandoval", "robert-eco", "ethan-luna", "andrea-guinto", "judy-castillo", "francis-reyes"
+        "maria-sandoval", "robert-eco", "ethan-luna", "andrea-guinto", "judy-castillo", "francis-reyes",
+        "dave-santos", "juan-cruz",
     ]
     assert all(item.action == "SIT" for item in result.responses)
 

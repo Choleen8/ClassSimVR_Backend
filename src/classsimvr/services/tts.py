@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
 import sys
@@ -12,7 +13,11 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import edge_tts
+from aiohttp import ClientError
+from edge_tts.exceptions import NoAudioReceived
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_VOICE_BY_PERSONA = {
@@ -24,6 +29,8 @@ DEFAULT_VOICE_BY_PERSONA = {
     "andrea-guinto": "en-US-JennyNeural",
     "judy-castillo": "en-US-AriaNeural",
     "francis-reyes": "en-US-GuyNeural",
+    "dave-santos": "en-US-AndrewNeural",
+    "juan-cruz": "en-US-BrianNeural",
 }
 
 
@@ -89,8 +96,19 @@ class TextToSpeechService:
         )
 
     async def _save_audio(self, text: str, voice: str, path: Path) -> None:
-        communicator = edge_tts.Communicate(text, voice)
-        await communicator.save(str(path))
+        for attempt in range(2):
+            try:
+                communicator = edge_tts.Communicate(text, voice)
+                await communicator.save(str(path))
+                return
+            except (NoAudioReceived, ClientError, TimeoutError) as error:
+                path.unlink(missing_ok=True)
+                logger.warning(
+                    "Edge TTS transient failure voice=%s attempt=%s/2 error=%s",
+                    voice, attempt + 1, type(error).__name__,
+                )
+                if attempt == 1:
+                    raise
 
     @staticmethod
     def _run_async(coroutine) -> None:

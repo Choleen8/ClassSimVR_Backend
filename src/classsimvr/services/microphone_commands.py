@@ -231,7 +231,10 @@ class MicrophoneCommandRouter:
                         )
                     })
                 except Exception as error:
-                    print(f"Edge TTS request failed: {type(error).__name__}: {error}")
+                    logger.exception(
+                        "Student TTS failed session=%s persona=%s voice=%s error=%s",
+                        session_id, student.student_id, student.voice, type(error).__name__,
+                    )
                     reply = reply.model_copy(update={"audio_url": None})
                 finally:
                     tts_ms += (time.perf_counter() - tts_started) * 1000

@@ -214,6 +214,41 @@ DEFAULT_STUDENT_PROFILES = (
         gender="male",
         supported_actions=THINKING_STUDENT_ACTIONS,
     ),
+    StudentProfile(
+        student_id="dave-santos",
+        name="Dave Santos",
+        aliases=("dave", "dave santos"),
+        personality=(
+            "Dave is a friendly Filipino VR student who is confident in familiar topics "
+            "and sometimes uncertain with difficult questions."
+        ),
+        language="English",
+        voice="en-US-AndrewNeural",
+        knowledge_level="INTERMEDIATE",
+        confidence=0.65,
+        willingness=0.6,
+        gender="male",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+    ),
+    StudentProfile(
+        student_id="juan-cruz",
+        name="Juan Cruz",
+        aliases=(
+            "juan", "juan cruz", "jun", "jun cruz", "juwan", "juwan cruz",
+            "huan", "huan cruz", "one cruz",
+        ),
+        personality=(
+            "Juan is a polite, curious, thoughtful Filipino VR student "
+            "who sometimes struggles with advanced questions."
+        ),
+        language="English",
+        voice="en-US-BrianNeural",
+        knowledge_level="INTERMEDIATE",
+        confidence=0.6,
+        willingness=0.6,
+        gender="male",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+    ),
 )
 
 
