@@ -33,6 +33,11 @@ class Session(Base):
         ForeignKey("trainee.trainee_id", ondelete="CASCADE"), nullable=False
     )
     grade: Mapped[str | None] = mapped_column(String(50))
+    subject: Mapped[str | None] = mapped_column(String(100))
+    topic: Mapped[str | None] = mapped_column(String(200))
+    session_mode: Mapped[str] = mapped_column(
+        String(20), default="practice", nullable=False
+    )
     competency: Mapped[str | None] = mapped_column(Text)
     lesson_plan: Mapped[str | None] = mapped_column(Text)
     answer_key: Mapped[str | None] = mapped_column(Text)

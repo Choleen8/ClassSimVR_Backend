@@ -1,14 +1,37 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .persona_contracts import AssignedPersonaResponse
 
 
 MIN_CLASS_SIZE = 15
 MAX_CLASS_SIZE = 30
+
+SUBJECTS_BY_GRADE: dict[str, tuple[str, ...]] = {
+    "Elementary": ("English", "Mathematics", "Science", "Araling Panlipunan"),
+    "High School": ("English", "Mathematics", "Science", "Filipino"),
+    "Senior High": ("English", "General Mathematics", "Earth and Life Science", "Practical Research"),
+    "College": ("Communication", "Education", "Information Technology", "Research Methods"),
+}
+
+TOPICS_BY_SUBJECT: dict[str, tuple[str, ...]] = {
+    "English": ("Reading comprehension", "Parts of speech", "Oral communication", "Writing a clear paragraph"),
+    "Mathematics": ("Fractions and decimals", "Linear equations", "Geometry", "Problem solving"),
+    "Science": ("The water cycle", "Matter and its properties", "Ecosystems", "Scientific investigation"),
+    "Araling Panlipunan": ("Philippine history", "Culture and identity", "Civic responsibility", "Geography of the Philippines"),
+    "Filipino": ("Pag-unawa sa binasa", "Wastong gamit ng wika", "Pagsasalaysay", "Panitikan"),
+    "General Mathematics": ("Functions", "Financial mathematics", "Statistics", "Logic and reasoning"),
+    "Earth and Life Science": ("Earth systems", "Biodiversity", "Climate and weather", "Life processes"),
+    "Practical Research": ("Research problem", "Literature review", "Research design", "Data interpretation"),
+    "Communication": ("Interpersonal communication", "Public speaking", "Media literacy", "Professional writing"),
+    "Education": ("Lesson planning", "Learner-centered teaching", "Classroom management", "Assessment strategies"),
+    "Information Technology": ("Programming fundamentals", "Data and information", "Web technologies", "Cybersecurity basics"),
+    "Research Methods": ("Research questions", "Qualitative methods", "Quantitative methods", "Research ethics"),
+}
 
 
 class StudentGenerationRequest(BaseModel):
@@ -19,17 +42,41 @@ class StudentGenerationRequest(BaseModel):
 class SessionCreate(BaseModel):
     trainee_id: int = Field(gt=0)
     grade: str | None = Field(default=None, max_length=50)
+    subject: str | None = Field(default=None, max_length=100)
+    topic: str | None = Field(default=None, max_length=200)
+    session_mode: Literal["practice", "assessment"] = "practice"
     competency: str | None = Field(default=None, max_length=4_000)
     lesson_plan: str | None = Field(default=None, max_length=12_000)
     answer_key: str | None = Field(default=None, max_length=12_000)
     class_size: int | None = Field(default=None, ge=MIN_CLASS_SIZE, le=MAX_CLASS_SIZE)
     difficulty: str | None = Field(default=None, max_length=50)
 
+    @model_validator(mode="after")
+    def validate_teaching_setup(self) -> "SessionCreate":
+        if self.topic and not self.subject:
+            raise ValueError("topic requires a subject")
+        if self.subject and not self.grade:
+            raise ValueError("subject requires a grade level")
+        if not self.subject:
+            return self
+
+        allowed_subjects = SUBJECTS_BY_GRADE.get(self.grade or "")
+        if allowed_subjects is None:
+            raise ValueError("grade must be Elementary, High School, Senior High, or College")
+        if self.subject not in allowed_subjects:
+            raise ValueError("subject is not available for the selected grade level")
+        if self.topic and self.topic not in TOPICS_BY_SUBJECT.get(self.subject, ()):
+            raise ValueError("topic is not available for the selected subject")
+        return self
+
 
 class SessionResponse(BaseModel):
     session_id: int
     trainee_id: int
     grade: str | None
+    subject: str | None
+    topic: str | None
+    session_mode: Literal["practice", "assessment"]
     competency: str | None
     lesson_plan: str | None
     answer_key: str | None
@@ -43,6 +90,9 @@ class TraineeHistoryResponse(BaseModel):
     session_id: int
     trainee_id: int
     grade: str | None
+    subject: str | None
+    topic: str | None
+    session_mode: Literal["practice", "assessment"]
     competency: str | None
     class_size: int | None
     difficulty: str | None
