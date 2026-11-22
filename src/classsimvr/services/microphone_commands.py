@@ -9,7 +9,7 @@ import unicodedata
 from .behavior import BehaviorService, classify_teacher_input
 from .contracts import BehaviorRequest, BehaviorResponse
 from .tts import TextToSpeechService
-from .student_registry import StudentProfile, StudentRegistry
+from .student_registry import StudentNotFoundError, StudentProfile, StudentRegistry
 
 
 StudentRoute = StudentProfile
@@ -157,7 +157,7 @@ class MicrophoneCommandRouter:
                     else self.registry.get_selected_grade_level(session_id)
                 ),
                 academic_behavior_enabled=(
-                    student.knowledge_level == "INTERMEDIATE"
+                    (student.knowledge_level == "INTERMEDIATE" or student.academic_behavior_enabled)
                     and "THINKING" in student.supported_actions
                     and "IDK" in student.supported_actions
                 ),
@@ -332,6 +332,20 @@ class MicrophoneCommandRouter:
     def _targets(self, transcript: str, default_persona_id: str) -> list[StudentRoute]:
         text = transcript.casefold()
         name_started = time.perf_counter()
+        # Classroom-specific standalone call, not a general name alias: "one"
+        # within a question, numbered instruction, or command stays unchanged.
+        if self._normalized_address_text(transcript) == "one":
+            try:
+                student = self.registry.get("juan-cruz")
+            except StudentNotFoundError:
+                logger.info("Standalone One ignored: Juan Cruz is not registered")
+                return []
+            self._last_latency_ms["student_name_detection"] = round(
+                (time.perf_counter() - name_started) * 1000, 2
+            )
+            logger.info("Standalone student call matched transcript=%r student=%s",
+                        transcript, student.student_id)
+            return [student]
         resolution = self.registry.resolve_with_status(text)
         self._last_latency_ms["student_name_detection"] = round(
             (time.perf_counter() - name_started) * 1000, 2
@@ -448,6 +462,8 @@ class MicrophoneCommandRouter:
     @classmethod
     def _is_name_only_address(cls, transcript: str, student: StudentRoute) -> bool:
         normalized = cls._normalized_address_text(transcript)
+        if student.student_id == "juan-cruz" and normalized == "one":
+            return True
         for alias in sorted(student.normalized_aliases(), key=len, reverse=True):
             normalized = re.sub(rf"\b{re.escape(alias)}\b", " ", normalized)
         return not re.sub(r"\s+", "", normalized)

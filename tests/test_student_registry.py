@@ -233,7 +233,7 @@ def test_legacy_berto_id_is_migrated_without_creating_duplicate_student():
 
     assert [profile.student_id for profile in loaded] == ["robert-eco"]
     assert [profile.student_id for profile in registry.list_students()].count("robert-eco") == 1
-    assert len(registry.list_students()) == 8
+    assert len(registry.list_students()) == 11
 
 
 def test_registry_keeps_chronological_conversation_memory_per_student_and_session():

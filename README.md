@@ -143,6 +143,57 @@ MICROPHONE_VAD_SILERO_THRESHOLD=0.5
 
 Use `MICROPHONE_VAD_SILENCE_MS=3000` when the teacher needs longer pauses. `/microphone/status` reports the active provider, calibrated noise floor, thresholds, speech probability, VAD timing, Whisper timing, routing timing, LLM timing, TTS timing, queue timing, and total response timing. A single Quest microphone cannot perfectly separate the teacher from nearby speakers; Silero plus adaptive gating reduces ordinary interference, while headset positioning, lower room volume, and noise suppression in Windows/Quest Link remain important.
 
+### Short student names and number homophones
+
+Whisper's roster prompt is refreshed from the registered students when listening
+starts. If a short utterance (at most four seconds, including its trailing pause)
+is transcribed as only `one` or `1`, the recognizer can retry the same audio with
+a `Juan Cruz` vocabulary hint, provided exactly one matching Juan is registered.
+Two search widths must agree on a name-only result with usable speech scores.
+This does not add `one` as a student alias or change numbered sentences, questions,
+or physical commands. English, Filipino, and Taglish remain enabled.
+
+```text
+WHISPER_RETRY_SHORT_NAMES=true
+WHISPER_SHORT_NAME_MIN_LOGPROB=-0.75
+```
+
+`GET /microphone/status` exposes `whisper.short_name_resolution` with the original
+transcript, candidate evidence, and `recovered` or `unresolved` decision. A null
+value means no short-name retry was needed. Unresolved audio keeps its original
+transcript; the diagnostic `hint` asks the teacher to repeat the full name.
+At the command-routing stage, the complete normalized word **one** is an explicit
+classroom exception: it calls registered student `juan-cruz` with the normal
+name-only acknowledgment. This includes `One.` and `ONE!`, but never rewrites
+`Question number one`, `One student should stand`, or other longer sentences.
+The digit `1` is not included in this routing exception, and no other student is
+selected if Juan is absent. The original teacher transcript remains in memory.
+A name hint cannot resolve every genuinely homophonic or
+noisy recording. Saying **Juan Cruz** supplies the missing context. Retries reuse
+the loaded model and add inference time only for this narrowly bounded case.
+
+### Additional registered students
+
+| Student | Canonical actor ID | Academic ability | Edge TTS voice |
+| --- | --- | --- | --- |
+| Eva Mendoza | `eva-mendoza` | ADVANCED | `en-US-EmmaNeural` |
+| Ara Villanueva | `ara-villanueva` | INTERMEDIATE | `en-US-AvaNeural` |
+| Kate Navarro | `kate-navarro` | BEGINNER | `en-US-MichelleNeural` |
+
+Each supports first/full-name addressing, independent per-session memory, shared
+classroom grade selection, and the existing thinking-capable action set. No grade
+is permanently assigned to a profile. These profiles opt into the shared ability
+controller with `academic_behavior_enabled=true`; its existing level-specific
+probabilities apply to all three abilities. Existing profiles retain their prior
+policy. This optional flag is also accepted by student registration and JSON
+configuration and still requires THINKING/IDK animation capabilities.
+
+Silent THINKING and the final spoken response retain the existing queue order.
+The Unreal consumer must continue playing queued responses sequentially, using
+the exact canonical actor tags above and each actor's own Media Player. Restart
+the backend after updating the default registrations; no dependency or database
+migration is required.
+
 ## Privacy and compliance
 
 The project includes a Philippine privacy/compliance baseline and a privacy-notice template in `docs/compliance/`. Consent now records its purpose and notice version, supports withdrawal, and prevents new recording after withdrawal. These are technical safeguards only; production use still requires the institution's DPO, privacy impact assessment, ethics approval, retention/deletion process, vendor review, security controls, and legal sign-off.

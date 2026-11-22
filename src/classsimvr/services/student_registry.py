@@ -104,6 +104,7 @@ class StudentProfile:
     willingness: float = 0.5
     gender: str = "unspecified"
     supported_actions: tuple[str, ...] = DEFAULT_STUDENT_ACTIONS
+    academic_behavior_enabled: bool = False
 
     def normalized_aliases(self) -> tuple[str, ...]:
         values = [self.student_id, self.name, *self.aliases]
@@ -249,6 +250,51 @@ DEFAULT_STUDENT_PROFILES = (
         gender="male",
         supported_actions=THINKING_STUDENT_ACTIONS,
     ),
+    StudentProfile(
+        student_id="eva-mendoza",
+        name="Eva Mendoza",
+        aliases=("eva", "eva mendoza"),
+        personality="Eva is an intelligent, confident, helpful, respectful Filipino VR student.",
+        language="English",
+        voice="en-US-EmmaNeural",
+        knowledge_level="ADVANCED",
+        confidence=0.8,
+        willingness=0.75,
+        gender="female",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+        academic_behavior_enabled=True,
+    ),
+    StudentProfile(
+        student_id="ara-villanueva",
+        name="Ara Villanueva",
+        aliases=("ara", "ara villanueva"),
+        personality="Ara is a curious, thoughtful, friendly, respectful Filipino VR student.",
+        language="English",
+        voice="en-US-AvaNeural",
+        knowledge_level="INTERMEDIATE",
+        confidence=0.6,
+        willingness=0.65,
+        gender="female",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+        academic_behavior_enabled=True,
+    ),
+    StudentProfile(
+        student_id="kate-navarro",
+        name="Kate Navarro",
+        aliases=("kate", "kate navarro"),
+        personality=(
+            "Kate is a shy, polite Filipino VR student who is eager to learn "
+            "and sometimes uncertain about difficult topics."
+        ),
+        language="English",
+        voice="en-US-MichelleNeural",
+        knowledge_level="BEGINNER",
+        confidence=0.4,
+        willingness=0.55,
+        gender="female",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+        academic_behavior_enabled=True,
+    ),
 )
 
 
@@ -294,6 +340,7 @@ class StudentRegistry:
             willingness=min(1.0, max(0.0, float(profile.willingness))),
             gender=profile.gender.strip() or "unspecified",
             supported_actions=tuple(dict.fromkeys(profile.supported_actions)),
+            academic_behavior_enabled=profile.academic_behavior_enabled is True,
         )
         with self._lock:
             if student_id in self._profiles:
@@ -606,6 +653,7 @@ class StudentRegistry:
                 supported_actions=tuple(
                     str(action) for action in item.get("supported_actions", DEFAULT_STUDENT_ACTIONS)
                 ),
+                academic_behavior_enabled=item.get("academic_behavior_enabled") is True,
             )
             loaded.append(self.register(profile))
         return loaded

@@ -28,6 +28,7 @@ class StudentRegistrationBody(BaseModel):
     confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     willingness: float = Field(default=0.5, ge=0.0, le=1.0)
     gender: str = Field(default="unspecified", max_length=30)
+    academic_behavior_enabled: bool = False
     supported_actions: list[str] = Field(
         default_factory=lambda: list(DEFAULT_STUDENT_ACTIONS), max_length=20
     )
@@ -112,6 +113,7 @@ def register_student(
                 willingness=body.willingness,
                 gender=body.gender,
                 supported_actions=tuple(body.supported_actions),
+                academic_behavior_enabled=body.academic_behavior_enabled,
             )
         )
     except DuplicateStudentError as error:

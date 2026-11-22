@@ -11,6 +11,57 @@ from classsimvr.routes.microphone import ListeningCoordinator
 from classsimvr.services.microphone import TranscriptionResult
 
 
+def test_recovered_juan_audio_reaches_existing_response_queue_and_assigned_voice():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from classsimvr.services.behavior import BehaviorService
+    from classsimvr.services.microphone_commands import MicrophoneCommandRouter
+    from classsimvr.services.speech_to_text import SpeechToTextService
+    from classsimvr.services.voice_listening import VoiceListeningService
+
+    class Recorder:
+        sample_rate = 16000
+
+        def start(self, callback):
+            self.callback = callback
+
+        def stop(self):
+            pass
+
+    class Model:
+        def transcribe(self, audio, **kwargs):
+            segment = SimpleNamespace(
+                text="Juan" if kwargs.get("hotwords") else "One.",
+                avg_logprob=-0.5, no_speech_prob=0.02,
+            )
+            return iter([segment]), SimpleNamespace(language="en")
+
+    coordinator = ListeningCoordinator()
+    transcriber = SpeechToTextService()
+    transcriber._model = Model()
+    tts = Mock()
+    tts.synthesize.return_value = "http://localhost/audio/juan.mp3"
+    coordinator.router = MicrophoneCommandRouter(behavior=BehaviorService(client=object()), tts=tts)
+    coordinator.listener = VoiceListeningService(
+        recorder_factory=lambda device: Recorder(), transcriber=transcriber,
+        on_transcription=coordinator._on_transcription,
+    )
+    try:
+        coordinator.start(MicrophoneStartBody())
+        coordinator.listener._enqueue(bytes(64000))
+        coordinator.listener.wait_for_idle(timeout=3)
+        item, = coordinator.poll("classroom", limit=10, drain=True)
+        assert item.transcript == "Juan" and item.target == "juan-cruz"
+        reply, = item.responses
+        assert (reply.persona_id, reply.action, reply.dialogue, reply.speak) == (
+            "juan-cruz", "NONE", "Yes, Ma'am!", True,
+        )
+        assert reply.audio_url == tts.synthesize.return_value
+        assert tts.synthesize.call_args.kwargs["voice"] == "en-US-BrianNeural"
+    finally:
+        coordinator.shutdown()
+
+
 class FakeManager:
     def start(self, device_name=None):
         return {"state": "recording", "device": device_name or "fake"}

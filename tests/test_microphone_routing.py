@@ -140,10 +140,40 @@ def test_juan_speech_variants_route_to_one_canonical_actor(alias):
     assert [(r.persona_id, r.action) for r in seated.responses] == [("juan-cruz", "SIT")]
 
 
-@pytest.mark.parametrize("text", ["One.", "One plus one.", "One, please sit down.", "I spoke to Jun yesterday."])
+@pytest.mark.parametrize("text", [
+    "One plus one.", "One, please sit down.", "I spoke to Jun yesterday.",
+    "Question number one", "One student should stand",
+])
 def test_juan_number_confusions_and_incidental_mentions_do_not_target_a_student(text):
     router = MicrophoneCommandRouter(behavior=BehaviorService(client=object()), tts=FakeTTS())
     result = router.handle(text, session_id="safe-juan")
+    assert result.target == "none" and result.responses == []
+
+
+@pytest.mark.parametrize("text", [
+    "Juan", "One.", "Juan Cruz", "Jun", "Juwan", "Huan", "  ONE!!!  ", '"one"',
+])
+def test_standalone_juan_calls_acknowledge_without_changing_posture(text):
+    router = MicrophoneCommandRouter(behavior=BehaviorService(client=object()), tts=FakeTTS())
+    result = router.handle(text, session_id="standalone-juan")
+    assert result.target == "juan-cruz"
+    reply, = result.responses
+    assert (reply.persona_id, reply.action, reply.dialogue, reply.speak) == (
+        "juan-cruz", "NONE", "Yes, Ma'am!", True,
+    )
+    assert reply.audio_url
+    memory = router.registry.get_conversation_memory("standalone-juan", "juan-cruz")
+    assert memory["recent_turns"][0]["text"] == text.strip()
+    # The special call must not turn "one" into a general-purpose alias.
+    assert router.registry.resolve("Question number one") is None
+
+
+def test_standalone_one_does_not_fall_back_to_a_different_student_if_juan_is_absent():
+    registry = StudentRegistry((StudentProfile(student_id="other", name="Other Student"),))
+    router = MicrophoneCommandRouter(
+        behavior=BehaviorService(client=object()), tts=FakeTTS(), registry=registry,
+    )
+    result = router.handle("One.", session_id="no-juan")
     assert result.target == "none" and result.responses == []
 
 
@@ -593,6 +623,7 @@ def test_routes_everyone_to_all_default_students():
     assert [item.persona_id for item in result.responses] == [
         "maria-sandoval", "robert-eco", "ethan-luna", "andrea-guinto", "judy-castillo", "francis-reyes",
         "dave-santos", "juan-cruz",
+        "eva-mendoza", "ara-villanueva", "kate-navarro",
     ]
     assert all(item.action == "SIT" for item in result.responses)
 

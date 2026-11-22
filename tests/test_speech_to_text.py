@@ -2,8 +2,121 @@ from __future__ import annotations
 
 import struct
 import wave
+from types import SimpleNamespace
+
+import pytest
 
 from classsimvr.services.speech_to_text import SpeechToTextService
+
+
+def _short_name_model(service, monkeypatch, results):
+    calls = []
+
+    class Model:
+        def transcribe(self, audio, **kwargs):
+            calls.append(kwargs)
+            text, score, no_speech = results[min(len(calls) - 1, len(results) - 1)]
+            segment = SimpleNamespace(text=text, avg_logprob=score, no_speech_prob=no_speech)
+            return iter([segment]), SimpleNamespace(language="en", language_probability=0.8)
+
+    monkeypatch.setattr(service, "_get_model", lambda: Model())
+    return calls
+
+
+def test_ambiguous_one_audio_recovers_registered_juan_only_after_decoder_agreement(monkeypatch):
+    service = SpeechToTextService(student_names=("Maria Sandoval", "Juan Cruz"))
+    calls = _short_name_model(service, monkeypatch, [
+        ("One.", -0.6, 0.02), ("Juan", -0.55, 0.02), ("Juan!", -0.5, 0.02),
+    ])
+    assert service.transcribe(struct.pack("<16000f", *([0.1] * 16000))) == "Juan"
+    assert [call["language"] for call in calls] == [None, "en", "en"]
+    assert [call["beam_size"] for call in calls] == [5, 5, 3]
+    assert [call.get("hotwords") for call in calls] == [None, "Juan Cruz", "Juan Cruz"]
+    assert service.diagnostics()["short_name_resolution"]["decision"] == "recovered"
+
+
+@pytest.mark.parametrize("candidates", [
+    [("1.", -0.4, 0.02), ("1.", -0.4, 0.02)],
+    [("Juan", -0.5, 0.02), ("One", -0.4, 0.02)],
+    [("Juan", -1.5, 0.02), ("Juan", -1.5, 0.02)],
+    [("Juan", -0.5, 0.8), ("Juan", -0.5, 0.8)],
+    [("Juan", float("nan"), 0.02), ("Juan", float("nan"), 0.02)],
+    [("Juan, stand up", -0.3, 0.02), ("Juan", -0.3, 0.02)],
+])
+def test_number_or_uncertain_name_retry_never_selects_juan(monkeypatch, candidates):
+    service = SpeechToTextService(student_names=("Juan Cruz",))
+    _short_name_model(service, monkeypatch, [("One.", -0.5, 0.02), *candidates])
+    assert service.transcribe(bytes(64000)) == "One."
+    resolution = service.diagnostics()["short_name_resolution"]
+    assert resolution["decision"] == "unresolved"
+    assert "Juan Cruz" in resolution["hint"]
+
+
+@pytest.mark.parametrize("text", [
+    "Number one", "One plus one is two.", "Please read question number one.",
+    "One, please sit down.", "Juan Cruz", "Maria!", "Juan, stand up.",
+])
+def test_regular_speech_and_number_sentences_are_not_rewritten_or_retried(monkeypatch, text):
+    service = SpeechToTextService()
+    calls = _short_name_model(service, monkeypatch, [(text, -0.3, 0.01)])
+    assert service.transcribe(bytes(64000)) == text
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("names", [("Maria Sandoval",), ("Juan Cruz", "Juan Reyes")])
+def test_short_name_retry_requires_a_unique_registered_student(monkeypatch, names):
+    service = SpeechToTextService(student_names=names)
+    calls = _short_name_model(service, monkeypatch, [("One.", -0.5, 0.02)])
+    assert service.transcribe(bytes(64000)) == "One."
+    assert len(calls) == 1
+
+
+def test_short_name_retry_can_be_disabled_and_has_no_stale_diagnostics(monkeypatch):
+    service = SpeechToTextService(student_names=("Juan Cruz",))
+    _short_name_model(service, monkeypatch, [
+        ("One.", -0.5, 0.02), ("Juan", -0.5, 0.02), ("Juan", -0.5, 0.02),
+        ("Number one", -0.5, 0.02),
+    ])
+    assert service.transcribe(bytes(64000)) == "Juan"
+    assert service.transcribe(bytes(64000)) == "Number one"
+    assert service.diagnostics()["short_name_resolution"] is None
+    monkeypatch.setenv("WHISPER_RETRY_SHORT_NAMES", "false")
+    disabled = SpeechToTextService()
+    calls = _short_name_model(disabled, monkeypatch, [("One.", -0.5, 0.02)])
+    assert disabled.transcribe(bytes(64000)) == "One."
+    assert len(calls) == 1
+
+
+def test_name_retry_does_not_process_long_recordings_or_invent_missing_confidence(monkeypatch):
+    service = SpeechToTextService(student_names=("Juan Cruz",))
+    calls = _short_name_model(service, monkeypatch, [("One.", -0.5, 0.02)])
+    assert service.transcribe(bytes(4 * 16000 * 5)) == "One."
+    assert len(calls) == 1
+    calls = _short_name_model(service, monkeypatch, [
+        ("One.", -0.5, 0.02), ("Juan", None, None),
+    ])
+    assert service.transcribe(bytes(64000)) == "One."
+    assert len(calls) == 2
+
+
+def test_optional_name_retry_failure_keeps_original_transcript(monkeypatch):
+    service = SpeechToTextService(student_names=("Juan Cruz",))
+
+    class Model:
+        def transcribe(self, audio, **kwargs):
+            if kwargs.get("hotwords"):
+                raise RuntimeError("decoder failed")
+            return iter([SimpleNamespace(text="One.")]), SimpleNamespace(language="en")
+
+    monkeypatch.setattr(service, "_get_model", lambda: Model())
+    assert service.transcribe(bytes(64000)) == "One."
+    assert service.diagnostics()["short_name_resolution"]["decision"] == "unresolved"
+
+
+def test_nonword_registered_display_name_does_not_break_short_name_detection(monkeypatch):
+    service = SpeechToTextService(student_names=("---", "Juan Cruz"))
+    _short_name_model(service, monkeypatch, [("Number one", -0.5, 0.02)])
+    assert service.transcribe(bytes(64000)) == "Number one"
 
 
 def test_wav_writer_resamples_48khz_audio_to_whisper_rate(tmp_path):

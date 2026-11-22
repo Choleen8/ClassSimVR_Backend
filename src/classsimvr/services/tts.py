@@ -31,6 +31,9 @@ DEFAULT_VOICE_BY_PERSONA = {
     "francis-reyes": "en-US-GuyNeural",
     "dave-santos": "en-US-AndrewNeural",
     "juan-cruz": "en-US-BrianNeural",
+    "eva-mendoza": "en-US-EmmaNeural",
+    "ara-villanueva": "en-US-AvaNeural",
+    "kate-navarro": "en-US-MichelleNeural",
 }
 
 

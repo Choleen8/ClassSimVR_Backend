@@ -4,6 +4,8 @@ import os
 import sys
 import wave
 import logging
+import math
+import re
 import threading
 import time
 from collections.abc import Iterable
@@ -12,6 +14,10 @@ from pathlib import Path
 from classsimvr.services.student_registry import DEFAULT_STUDENT_PROFILES
 
 logger = logging.getLogger(__name__)
+
+# Acoustic ambiguities are decoder hints, never registry aliases. In particular,
+# adding "one" as Juan's alias would turn ordinary arithmetic into student calls.
+_SHORT_NAME_HOMOPHONES = {"juan": {"one", "1"}}
 
 
 class SpeechToTextUnavailableError(RuntimeError):
@@ -41,6 +47,12 @@ class SpeechToTextService:
         self.retry_tagalog_on_arabic_short_utterance = os.getenv(
             "WHISPER_RETRY_TAGALOG_ON_ARABIC_SHORT_UTTERANCE", "true"
         ).strip().casefold() not in {"0", "false", "no", "off"}
+        self.retry_short_names = os.getenv(
+            "WHISPER_RETRY_SHORT_NAMES", "true"
+        ).strip().casefold() not in {"0", "false", "no", "off"}
+        self.short_name_min_logprob = float(os.getenv("WHISPER_SHORT_NAME_MIN_LOGPROB", "-0.75"))
+        self._last_short_name_resolution: dict | None = None
+        self._last_detected_language: str | None = None
         self._model = None
         self._model_lock = threading.Lock()
         self._model_load_ms: float | None = None
@@ -57,6 +69,8 @@ class SpeechToTextService:
         ))
 
     def transcribe(self, audio_bytes: bytes, sample_rate: int = 16_000) -> str:
+        self._last_short_name_resolution = None
+        self._last_detected_language = None
         if not audio_bytes:
             return ""
         model = self._get_model()
@@ -82,6 +96,7 @@ class SpeechToTextService:
 
     def _recognize(self, model, audio) -> str:
         text, info = self._transcribe_once(model, audio, language=self.language)
+        self._last_detected_language = str(getattr(info, "language", "")) or None
         if self.language is None:
             detected_language = str(getattr(info, "language", "")).casefold()
             if self.retry_tagalog_on_indonesian and detected_language in {
@@ -109,19 +124,105 @@ class SpeechToTextService:
                 tagalog_text, _ = self._transcribe_once(model, audio, language="tl")
                 if tagalog_text and not self._contains_arabic_script(tagalog_text):
                     text = tagalog_text
+        if self.language in {None, "en", "tl"}:
+            text = self._resolve_short_name(model, audio, text)
         return text
 
-    def _transcribe_once(self, model, audio, *, language: str | None):
+    @staticmethod
+    def _name_key(text: str) -> str:
+        return " ".join(re.findall(r"\w+", text.casefold()))
+
+    def _resolve_short_name(self, model, audio, text: str) -> str:
+        if not self.retry_short_names or len(audio) > 4 * 16_000:
+            return text
+        normalized = self._name_key(text)
+        full_names = self._student_names or tuple(student.name for student in DEFAULT_STUDENT_PROFILES)
+        matches = []
+        for name in full_names:
+            words = self._name_key(name).split()
+            if words and normalized in _SHORT_NAME_HOMOPHONES.get(words[0], set()):
+                matches.append(name)
+        # A first name shared by two students is not enough to select either one.
+        if len(matches) != 1:
+            return text
+        name, = matches
+        accepted_names = {self._name_key(name), self._name_key(name).split()[0]}
+        resolution = {
+            "original": text, "candidate_name": name, "decision": "unresolved",
+            "candidates": [], "hint": f"Please repeat the full student name: {name}.",
+        }
+        self._last_short_name_resolution = resolution
+        agreed_name = None
+        # Decode the SAME audio at two search widths in its detected language.
+        # Forcing Tagalog on a short English name can erase valid acoustic
+        # evidence. A hotword is only a hint: accept a name-only result only when
+        # both searches agree and have usable speech/confidence scores.
+        # Never rewrite a numbered sentence or
+        # infer a physical command from an ambiguous single word.
+        language = self.language or (
+            self._last_detected_language if self._last_detected_language in {"en", "tl"} else None
+        )
+        for beam_size in (5, 3):
+            quality = {}
+            try:
+                candidate, _ = self._transcribe_once(
+                    model, audio, language=language, hotwords=name, quality=quality,
+                    beam_size=beam_size,
+                )
+            except Exception:
+                logger.warning("Short-name retry failed language=%s; preserving transcript=%r",
+                               language, text, exc_info=True)
+                return text
+            resolution["candidates"].append({
+                "language": language or "auto", "beam_size": beam_size,
+                "text": candidate, **quality,
+            })
+            candidate_key = self._name_key(candidate)
+            score = quality.get("avg_logprob")
+            no_speech = quality.get("no_speech_prob")
+            confident = (
+                score is not None and math.isfinite(score) and score >= self.short_name_min_logprob
+                and no_speech is not None and math.isfinite(no_speech) and no_speech <= 0.35
+            )
+            logger.info("Short-name evidence original=%r candidate=%r language=%s quality=%s",
+                        text, candidate, language, quality)
+            if candidate_key not in accepted_names or not confident:
+                logger.info("Short-name ambiguity retained transcript=%r hint=%s", text, resolution["hint"])
+                return text
+            if agreed_name is not None and candidate_key != agreed_name:
+                return text
+            agreed_name = candidate_key
+        resolution["decision"] = "recovered"
+        resolution["hint"] = None
+        # Return the registered spelling, rather than a number alias or a model-
+        # invented ID. StudentRegistry still enforces the final student identity.
+        recovered = name if agreed_name == self._name_key(name) else name.split()[0]
+        logger.info("Short-name recovered original=%r student_name=%r", text, recovered)
+        return recovered
+
+    def _transcribe_once(
+        self, model, audio, *, language: str | None,
+        hotwords: str | None = None, quality: dict | None = None, beam_size: int = 5,
+    ):
+        hints = {"hotwords": hotwords} if hotwords else {}
         segments, info = model.transcribe(
             audio,
             language=language,
             task="transcribe",
             vad_filter=True,
-            beam_size=5,
+            beam_size=beam_size,
             temperature=0.0,
             condition_on_previous_text=False,
             initial_prompt=self._initial_prompt(),
+            **hints,
         )
+        segments = list(segments)
+        if quality is not None:
+            for field, choose in (("avg_logprob", min), ("no_speech_prob", max)):
+                values = [getattr(segment, field, None) for segment in segments]
+                quality[field] = choose(values) if values and all(
+                    isinstance(value, (int, float)) and math.isfinite(value) for value in values
+                ) else None
         return " ".join(segment.text.strip() for segment in segments).strip(), info
 
     def _initial_prompt(self) -> str:
@@ -214,6 +315,10 @@ class SpeechToTextService:
             "language": self.language or "auto",
             "retry_tagalog_on_indonesian": self.retry_tagalog_on_indonesian,
             "retry_tagalog_on_arabic_short_utterance": self.retry_tagalog_on_arabic_short_utterance,
+            "retry_short_names": self.retry_short_names,
+            "short_name_min_logprob": self.short_name_min_logprob,
+            "short_name_resolution": self._last_short_name_resolution,
+            "last_detected_language": self._last_detected_language,
             "model_loaded": self._model is not None,
             "model_load_ms": self._model_load_ms,
             "last_preprocessing_ms": self._last_preprocessing_ms,

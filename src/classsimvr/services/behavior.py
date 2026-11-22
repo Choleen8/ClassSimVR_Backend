@@ -427,7 +427,6 @@ class BehaviorService:
             request.academic_behavior_enabled
             and "THINKING" in request.supported_actions
             and "IDK" in request.supported_actions
-            and request.knowledge_level == "INTERMEDIATE"
         ):
             academic_started = time.perf_counter()
             academic_decision = self.academic_controller.select_behavior(
