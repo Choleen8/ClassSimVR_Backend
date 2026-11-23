@@ -10,11 +10,12 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
+from dotenv import load_dotenv
 from pydantic import ValidationError
 
 from .contracts import BehaviorRequest, BehaviorResponse, TokenUsage
 from .academic_ability import AcademicAbilityController, SelectedBehavior
-from .gemini_client import create_gemini_client
+from .ollama_client import create_ollama_client
 from .token_budget import TokenBudget
 from .student_registry import normalize_grade_level
 
@@ -238,8 +239,9 @@ class BehaviorService:
         fallback_responses: dict[str, str] | None = None,
         academic_controller: AcademicAbilityController | None = None,
     ) -> None:
+        load_dotenv()
         self.client = client
-        self.model = model or os.getenv("GEMINI_BEHAVIOR_MODEL", "gemini-3.5-flash-lite")
+        self.model = model or os.getenv("OLLAMA_BEHAVIOR_MODEL", "qwen3:4b-instruct")
         self.budget = budget or TokenBudget()
         self.max_retries = max(0, max_retries)
         self.fallback_responses = fallback_responses or {}
@@ -528,12 +530,12 @@ class BehaviorService:
                 )
                 return result
             except (json.JSONDecodeError, ValidationError) as error:
-                print(f"Gemini behavior response validation failed: {type(error).__name__}: {error}")
+                logger.warning("Qwen behavior response validation failed: %s", type(error).__name__)
                 return self._apply_academic_decision(
                     self._fallback(request, error), request, academic_decision
                 )
             except Exception as error:  # Provider and parsing failures use the bounded fallback.
-                print(f"Gemini behavior request failed: {type(error).__name__}: {error}")
+                logger.warning("Qwen behavior request failed: %s", type(error).__name__)
                 last_error = error
                 if getattr(error, "code", None) in (400, 401, 403, 404):
                     break
@@ -628,7 +630,7 @@ class BehaviorService:
 
     def _client(self) -> Any:
         if self.client is None:
-            self.client = create_gemini_client()
+            self.client = create_ollama_client()
         return self.client
 
     @staticmethod

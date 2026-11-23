@@ -7,7 +7,7 @@ This document defines the shared boundary between the Unreal VR client and the P
 | Capability | Backend | Unreal/shared client |
 |---|---|---|
 | Session and class roster | Owns session lifecycle and generates 15–30 session-only students | Requests roster and spawns corresponding visual learners |
-| Persona behavior | Resolves persona/state and calls OpenAI with bounded context | Sends trainee/scene events and renders returned dialogue/emotion/action |
+| Persona behavior | Resolves persona/state and calls local Qwen through Ollama with bounded context | Sends trainee/scene events and renders returned dialogue/emotion/action |
 | Speech-to-text | Captures the Quest Link microphone, detects utterances with VAD, and transcribes locally | Toggles listening and polls routed responses |
 | Text-to-speech | Chooses dialogue and language | Speaks dialogue and drives audio/lip-sync |
 | Classroom visuals | No VR rendering | Owns OpenXR, MetaHuman, movement, gaze, gestures, animation, and ambient crowd |
@@ -16,6 +16,8 @@ This document defines the shared boundary between the Unreal VR client and the P
 | Privacy | Consent/status/retention metadata and future authorization boundary | Shows consent UI and prevents recording before consent is granted |
 
 ## Local development
+
+Live student responses and classroom volunteer decisions use `qwen3:4b-instruct` through Ollama on the backend computer. Install Ollama, pull the model with `ollama pull qwen3:4b-instruct`, and keep the Ollama service running while FastAPI is running. Configure `OLLAMA_BASE_URL` and `OLLAMA_BEHAVIOR_MODEL` in the backend `.env`. If the model service is unavailable, the backend uses its existing deterministic fallback; it does not send behavior prompts to a cloud provider.
 
 Start the backend from the project root:
 
@@ -69,7 +71,7 @@ Content-Type: application/json
 }
 ```
 
-`class_size` must be 15–30. `seed` is optional. The backend generates a local deterministic roster and automatically assigns each student to the session. This does not call OpenAI.
+`class_size` must be 15–30. `seed` is optional. The backend generates a local deterministic roster and automatically assigns each student to the session. This does not call the language model.
 
 The response contains `session_id`, `class_size`, `seed`, and `students`. Each student includes `persona_id`, `name`, language profile, stable traits/triggers, current state, emotion, and session assignment.
 
@@ -422,7 +424,7 @@ Use idempotent client state and avoid firing duplicate generation, recording-sta
 
 ## Security and privacy
 
-- Keep `OPENAI_API_KEY` and database credentials on the backend only.
+- Keep provider credentials, if any, and database credentials on the backend only. Local Ollama behavior generation does not require an OpenAI API key.
 - Use HTTPS outside local development.
 - Obtain and display consent before recording.
 - Do not log raw audio/video, API keys, or full sensitive payloads.

@@ -4,7 +4,22 @@ ClassSim VR provides a PostgreSQL-backed model layer and a token-bounded learner
 
 ## Run the behavior API
 
-Set `OPENAI_API_KEY` in `.env`, then start the local API from the project root:
+Install [Ollama](https://ollama.com), then download the configured local model:
+
+```powershell
+ollama pull qwen3:4b-instruct
+```
+
+Keep Ollama running on the same computer as FastAPI. Its local chat API defaults to `http://127.0.0.1:11434`. Configure these values in `.env` if needed:
+
+```dotenv
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_BEHAVIOR_MODEL=qwen3:4b-instruct
+```
+
+The live student behavior service uses Qwen through Ollama. OpenAI's separate client and package are unchanged; OpenAI is not called by the live behavior flow.
+
+Start the local API from the project root:
 
 ```powershell
 uvicorn classsimvr.app:app --reload
@@ -16,7 +31,7 @@ The first service endpoint is:
 POST /sessions/{session_id}/turn
 ```
 
-The behavior service sends bounded persona, scene, summary, and recent-turn context to OpenAI. It limits output length, retries transient failures a fixed number of times, and returns a local fallback response when the provider is unavailable. Automated tests use an injected fake client and do not make network calls.
+The behavior service sends bounded persona, scene, summary, and recent-turn context to Qwen through Ollama. It limits output length, retries transient failures a fixed number of times, and returns a local fallback response when Ollama is unavailable. The same local model handles classroom volunteer decisions. Deterministic physical commands and academic ability safeguards remain in backend logic.
 
 ## Unreal integration contract
 

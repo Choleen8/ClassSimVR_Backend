@@ -15,7 +15,6 @@ instructor
 psycopg[binary]
 anthropic
 openai
-google-genai
 edge-tts==7.3.1
 sounddevice
 numpy

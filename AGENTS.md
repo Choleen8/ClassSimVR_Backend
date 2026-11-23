@@ -126,8 +126,8 @@ Assessment output should use these standards as structured data, not as unvalida
 - Server-side Google OAuth login with signed HttpOnly application-session cookies.
 - Legacy behavior route remains available:
   `POST /sessions/{session_id}/turn`
-- OpenAI Responses API behavior generation with strict structured output, bounded input/output tokens, bounded retries, and local fallback behavior.
-- Tests use SQLite and fake OpenAI clients; tests do not require PostgreSQL, OpenAI network access, or Unreal.
+- Local Qwen behavior generation through Ollama with strict structured output, bounded input/output tokens, bounded retries, and local fallback behavior.
+- Tests use SQLite and injected fake model clients; tests do not require PostgreSQL, Ollama network access, or Unreal.
 - Persona/profile and runtime JSON validation, inactive-persona protection, wrong-persona response protection, and read-only convenience many-to-many relationships.
 
 ### Not implemented yet
@@ -226,18 +226,18 @@ The structured response is:
 
 Unreal should use a small API adapter and never depend on SQLAlchemy names, database sessions, internal prompt text, or provider-specific response objects. Cache the assigned persona list for a session when appropriate, but refresh runtime state from the session endpoint when state synchronization matters.
 
-## 7. OpenAI and token-management rules
+## 7. Local model and token-management rules
 
 - Keep behavior generation and assessment as separate services. They have different latency, model, prompt, and evidence requirements.
-- Do not send the complete database object or unbounded conversation history to OpenAI.
+- Do not send the complete database object or unbounded conversation history to the model.
 - Keep persona profile text compact and stable.
 - Bound scene state, summary, recent turns, and trainee input before the model call.
-- Keep output schema strict: persona ID, dialogue, emotion, and action.
+- Keep output schema strict: persona ID, dialogue, emotion, and action. The live behavior model is `qwen3:4b-instruct` through local Ollama; the separate OpenAI client remains unchanged.
 - Enforce that the model-returned persona ID matches the requested persona ID.
 - Use bounded retry counts and a deterministic local fallback.
 - Never expose provider errors, API keys, or raw prompts in API responses.
 - Treat the compliance documents as an engineering baseline, not legal certification. Production deployment requires a named PIC/DPO, approved notice and lawful basis, privacy impact assessment, retention/deletion workflow, vendor/transfer review, security controls, and incident-response process.
-- Tests must use fake clients and must not make live OpenAI calls.
+- Tests must use fake clients and must not make live model-service calls.
 
 ## 8. Development and testing workflow
 

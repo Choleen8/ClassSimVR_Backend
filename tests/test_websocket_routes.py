@@ -7,7 +7,8 @@ from sqlalchemy.pool import StaticPool
 from classsimvr.app import app
 from classsimvr.database import get_session
 from classsimvr.models import Base, Persona, Session, SessionPersona, Trainee
-from classsimvr.routes.behavior import get_behavior_service, get_tts_service
+from classsimvr.routes.behavior import get_tts_service
+from classsimvr.routes.websocket import get_websocket_behavior_service
 from classsimvr.services.contracts import BehaviorResponse
 
 
@@ -38,7 +39,7 @@ def websocket_client():
             return None
 
     app.dependency_overrides[get_session] = override_get_session
-    app.dependency_overrides[get_behavior_service] = lambda: FakeBehaviorService()
+    app.dependency_overrides[get_websocket_behavior_service] = lambda: FakeBehaviorService()
     app.dependency_overrides[get_tts_service] = lambda: FakeTTSService()
     client = TestClient(app)
     with DbSession(engine) as db:
