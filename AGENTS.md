@@ -126,8 +126,8 @@ Assessment output should use these standards as structured data, not as unvalida
 - Server-side Google OAuth login with signed HttpOnly application-session cookies.
 - Legacy behavior route remains available:
   `POST /sessions/{session_id}/turn`
-- Local Qwen behavior generation through Ollama with strict structured output, bounded input/output tokens, bounded retries, and local fallback behavior.
-- Tests use SQLite and injected fake model clients; tests do not require PostgreSQL, Ollama network access, or Unreal.
+- OpenAI API behavior generation with strict structured output, bounded input/output tokens, bounded retries, and deterministic fallback behavior.
+- Tests use SQLite and injected fake model clients; tests do not require PostgreSQL, OpenAI network access, or Unreal.
 - Persona/profile and runtime JSON validation, inactive-persona protection, wrong-persona response protection, and read-only convenience many-to-many relationships.
 
 ### Not implemented yet
@@ -232,7 +232,7 @@ Unreal should use a small API adapter and never depend on SQLAlchemy names, data
 - Do not send the complete database object or unbounded conversation history to the model.
 - Keep persona profile text compact and stable.
 - Bound scene state, summary, recent turns, and trainee input before the model call.
-- Keep output schema strict: persona ID, dialogue, emotion, and action. The live behavior model is `qwen3:4b-instruct` through local Ollama; the separate OpenAI client remains unchanged.
+- Keep output schema strict: persona ID, dialogue, emotion, action, and speak. Live behavior and classroom volunteer decisions use the OpenAI API, configured by `OPENAI_BEHAVIOR_MODEL`; never route live behavior prompts to a local or alternate cloud model provider.
 - Enforce that the model-returned persona ID matches the requested persona ID.
 - Use bounded retry counts and a deterministic local fallback.
 - Never expose provider errors, API keys, or raw prompts in API responses.

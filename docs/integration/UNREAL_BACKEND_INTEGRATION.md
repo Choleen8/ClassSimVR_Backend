@@ -7,7 +7,7 @@ This document defines the shared boundary between the Unreal VR client and the P
 | Capability | Backend | Unreal/shared client |
 |---|---|---|
 | Session and class roster | Owns session lifecycle and generates 15–30 session-only students | Requests roster and spawns corresponding visual learners |
-| Persona behavior | Resolves persona/state and calls local Qwen through Ollama with bounded context | Sends trainee/scene events and renders returned dialogue/emotion/action |
+| Persona behavior | Resolves persona/state and calls the configured OpenAI model with bounded context | Sends trainee/scene events and renders returned dialogue/emotion/action |
 | Speech-to-text | Captures the Quest Link microphone, detects utterances with VAD, and transcribes locally | Toggles listening and polls routed responses |
 | Text-to-speech | Chooses dialogue and language | Speaks dialogue and drives audio/lip-sync |
 | Classroom visuals | No VR rendering | Owns OpenXR, MetaHuman, movement, gaze, gestures, animation, and ambient crowd |
@@ -17,7 +17,7 @@ This document defines the shared boundary between the Unreal VR client and the P
 
 ## Local development
 
-Live student responses and classroom volunteer decisions use `qwen3:4b-instruct` through Ollama on the backend computer. Install Ollama, pull the model with `ollama pull qwen3:4b-instruct`, and keep the Ollama service running while FastAPI is running. Configure `OLLAMA_BASE_URL` and `OLLAMA_BEHAVIOR_MODEL` in the backend `.env`. If the model service is unavailable, the backend uses its existing deterministic fallback; it does not send behavior prompts to a cloud provider.
+Live student responses and classroom volunteer decisions use the OpenAI API. Set `OPENAI_API_KEY` privately in the backend `.env`; configure the model and token limits with `OPENAI_BEHAVIOR_MODEL`, `OPENAI_BEHAVIOR_MAX_INPUT_TOKENS`, `OPENAI_BEHAVIOR_MAX_OUTPUT_TOKENS`, `OPENAI_BEHAVIOR_RECENT_TURN_LIMIT`, `OPENAI_BEHAVIOR_MAX_RETRIES`, `OPENAI_CLASSROOM_MAX_INPUT_TOKENS`, and `OPENAI_CLASSROOM_MAX_OUTPUT_TOKENS`. The backend reserves input budget for system instructions and response schemas, logs provider-reported token usage without prompt or credential contents, and disables SDK-level retries so the service applies one bounded retry policy. If the API is unavailable or the key is missing, the backend uses its existing deterministic fallback. Whisper speech recognition and Edge TTS remain on their existing pipelines.
 
 Start the backend from the project root:
 

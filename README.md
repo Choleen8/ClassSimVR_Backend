@@ -4,20 +4,20 @@ ClassSim VR provides a PostgreSQL-backed model layer and a token-bounded learner
 
 ## Run the behavior API
 
-Install [Ollama](https://ollama.com), then download the configured local model:
-
-```powershell
-ollama pull qwen3:4b-instruct
-```
-
-Keep Ollama running on the same computer as FastAPI. Its local chat API defaults to `http://127.0.0.1:11434`. Configure these values in `.env` if needed:
+Live student responses and classroom volunteer decisions use the OpenAI API. Set your API key privately in the backend `.env` file and select the model there:
 
 ```dotenv
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_BEHAVIOR_MODEL=qwen3:4b-instruct
+OPENAI_API_KEY=your-private-key
+OPENAI_BEHAVIOR_MODEL=gpt-6-luna
+OPENAI_BEHAVIOR_MAX_INPUT_TOKENS=1200
+OPENAI_BEHAVIOR_MAX_OUTPUT_TOKENS=180
+OPENAI_BEHAVIOR_RECENT_TURN_LIMIT=6
+OPENAI_BEHAVIOR_MAX_RETRIES=1
+OPENAI_CLASSROOM_MAX_INPUT_TOKENS=2400
+OPENAI_CLASSROOM_MAX_OUTPUT_TOKENS=1024
 ```
 
-The live student behavior service uses Qwen through Ollama. OpenAI's separate client and package are unchanged; OpenAI is not called by the live behavior flow.
+The OpenAI key is required for live model-generated behavior. The backend keeps its existing deterministic fallback for API failures. Whisper speech recognition and Edge TTS remain on their existing pipelines.
 
 Start the local API from the project root:
 
@@ -31,7 +31,9 @@ The first service endpoint is:
 POST /sessions/{session_id}/turn
 ```
 
-The behavior service sends bounded persona, scene, summary, and recent-turn context to Qwen through Ollama. It limits output length, retries transient failures a fixed number of times, and returns a local fallback response when Ollama is unavailable. The same local model handles classroom volunteer decisions. Deterministic physical commands and academic ability safeguards remain in backend logic.
+The behavior service sends bounded persona, scene, summary, and recent-turn context to the configured OpenAI model. It reserves input capacity for system instructions and the response schema, bounds response length and retries, and returns a local fallback response when the API is unavailable. Classroom volunteer decisions use one bounded batch request with a deterministic local fallback. Deterministic physical commands and academic ability safeguards remain in backend logic.
+
+Token limits are configurable through the variables above. Input budgeting uses a conservative character-based estimate and provider-reported usage is the authoritative count; successful OpenAI calls log input, output, and total tokens without logging prompts, dialogue, or credentials. Student behavior defaults to 1,200 estimated input tokens, 180 output tokens, and six recent turns. Classroom volunteer calls default to 2,400 estimated input tokens and 1,024 output tokens. OpenAI SDK retries are disabled so the behavior service's single retry policy controls billable attempts.
 
 ## Unreal integration contract
 

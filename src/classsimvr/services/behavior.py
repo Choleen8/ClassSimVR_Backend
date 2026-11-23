@@ -15,8 +15,9 @@ from pydantic import ValidationError
 
 from .contracts import BehaviorRequest, BehaviorResponse, TokenUsage
 from .academic_ability import AcademicAbilityController, SelectedBehavior
-from .ollama_client import create_ollama_client
+from .openai_client import create_openai_client
 from .token_budget import TokenBudget
+from .token_budget import estimate_tokens
 from .student_registry import normalize_grade_level
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,44 @@ ACTION_VALUES = [
     "THINKING",
     "IDK",
 ]
+
+BEHAVIOR_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "persona_id": {"type": "STRING"},
+        "dialogue": {"type": "STRING"},
+        "emotion": {"type": "STRING"},
+        "action": {"type": "STRING", "enum": ACTION_VALUES},
+        "speak": {"type": "BOOLEAN"},
+    },
+    "required": ["persona_id", "dialogue", "emotion", "action", "speak"],
+}
+
+VOLUNTEER_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "decisions": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "persona_id": {"type": "STRING"},
+                    "action": {"type": "STRING", "enum": ["RAISE_HAND", "NONE"]},
+                },
+                "required": ["persona_id", "action"],
+            },
+        }
+    },
+    "required": ["decisions"],
+}
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return min(maximum, max(minimum, value))
 
 
 @dataclass(frozen=True)
@@ -235,15 +274,19 @@ class BehaviorService:
         client: Any | None = None,
         model: str | None = None,
         budget: TokenBudget | None = None,
-        max_retries: int = 2,
+        max_retries: int | None = None,
         fallback_responses: dict[str, str] | None = None,
         academic_controller: AcademicAbilityController | None = None,
     ) -> None:
         load_dotenv()
         self.client = client
-        self.model = model or os.getenv("OLLAMA_BEHAVIOR_MODEL", "qwen3:4b-instruct")
-        self.budget = budget or TokenBudget()
-        self.max_retries = max(0, max_retries)
+        self.model = model or os.getenv("OPENAI_BEHAVIOR_MODEL", "gpt-6-luna")
+        self.budget = budget or TokenBudget.from_env()
+        self.max_retries = (
+            _bounded_env_int("OPENAI_BEHAVIOR_MAX_RETRIES", 1, 0, 1)
+            if max_retries is None
+            else max(0, max_retries)
+        )
         self.fallback_responses = fallback_responses or {}
         self.academic_controller = academic_controller or AcademicAbilityController()
         self._timings = threading.local()
@@ -265,21 +308,21 @@ class BehaviorService:
         if not question.strip() or not students:
             return {}
         allowed = {student.student_id: student for student in students}
-        prompt = json.dumps({
+        payload = {
             "classroom_question": question.strip()[:4000],
             "round_number": round_number,
             "students": [
                 {
                     "persona_id": student.student_id,
                     "name": student.name,
-                    "personality": student.personality,
+                    "personality": str(student.personality)[:240],
                     "knowledge_level": student.knowledge_level,
                     "confidence": student.confidence,
                     "willingness": student.willingness,
                 }
                 for student in students
             ],
-        }, ensure_ascii=False)
+        }
         instruction = (
             "You are evaluating classroom participation. For every listed student, make an "
             "independent decision based on the question, knowledge_level, personality, "
@@ -288,6 +331,31 @@ class BehaviorService:
             "decisions, one entry per listed persona_id. action must be exactly RAISE_HAND or "
             "NONE. Volunteers remain seated and silent; do not generate dialogue."
         )
+        input_cap = _bounded_env_int("OPENAI_CLASSROOM_MAX_INPUT_TOKENS", 2_400, 1_024, 6_000)
+        output_cap = _bounded_env_int("OPENAI_CLASSROOM_MAX_OUTPUT_TOKENS", 1_024, 256, 2_048)
+        input_budget = TokenBudget(
+            max_input_tokens=input_cap, reserve_prompt_overhead=True
+        ).payload_budget(
+            system_instruction=instruction, response_schema=VOLUNTEER_RESPONSE_SCHEMA
+        ).max_input_tokens
+        while estimate_tokens(json.dumps(payload, ensure_ascii=False)) > input_budget:
+            reducible = [
+                student_data for student_data in payload["students"]
+                if len(student_data["personality"]) > 40
+            ]
+            if reducible:
+                longest = max(reducible, key=lambda item: len(item["personality"]))
+                value = longest["personality"]
+                longest["personality"] = value[:max(40, int(len(value) * 0.75))].rstrip()
+                continue
+            question_value = payload["classroom_question"]
+            if len(question_value) > 128:
+                payload["classroom_question"] = question_value[:max(128, int(len(question_value) * 0.75))].rstrip()
+                continue
+            logger.warning("Classroom volunteer prompt exceeds configured input budget; using local decision")
+            return self._local_classroom_volunteer_decisions(students, round_number=round_number)
+        prompt = json.dumps(payload, ensure_ascii=False)
+        max_output_tokens = min(output_cap, max(256, len(students) * 24))
         started = time.perf_counter()
         last_error: Exception | None = None
         self._last_latency_ms.update(ai_api=0.0, ai_calls=0)
@@ -298,25 +366,10 @@ class BehaviorService:
                     contents=prompt,
                     config={
                         "system_instruction": instruction,
-                        "max_output_tokens": max(256, min(self.budget.max_output_tokens, 1024)),
+                        "max_output_tokens": max_output_tokens,
+                        "usage_category": "classroom_volunteers",
                         "response_mime_type": "application/json",
-                        "response_schema": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "decisions": {
-                                    "type": "ARRAY",
-                                    "items": {
-                                        "type": "OBJECT",
-                                        "properties": {
-                                            "persona_id": {"type": "STRING"},
-                                            "action": {"type": "STRING", "enum": ["RAISE_HAND", "NONE"]},
-                                        },
-                                        "required": ["persona_id", "action"],
-                                    },
-                                }
-                            },
-                            "required": ["decisions"],
-                        },
+                        "response_schema": VOLUNTEER_RESPONSE_SCHEMA,
                     },
                 )
                 parsed = json.loads(response.text)
@@ -340,13 +393,13 @@ class BehaviorService:
                 return result
             except Exception as error:
                 last_error = error
-                logger.warning("Classroom volunteer batch decision failed: %s", error)
+                logger.warning("OpenAI classroom volunteer decision failed: %s", type(error).__name__)
                 if getattr(error, "code", None) in (400, 401, 403, 404):
                     break
         self._last_latency_ms["classroom_volunteer_decision"] = round(
             (time.perf_counter() - started) * 1000, 2
         )
-        logger.warning("Using local classroom volunteer fallback after provider failure: %s", last_error)
+        logger.warning("Using local classroom volunteer fallback after OpenAI failure: %s", type(last_error).__name__ if last_error else "unknown")
         return self._local_classroom_volunteer_decisions(students, round_number=round_number)
 
     @staticmethod
@@ -459,7 +512,11 @@ class BehaviorService:
                 return reply
 
         llm_started = time.perf_counter()
-        payload = self.budget.prepare_payload(
+        response_budget = self.budget.payload_budget(
+            system_instruction=BEHAVIOR_INSTRUCTIONS,
+            response_schema=BEHAVIOR_RESPONSE_SCHEMA,
+        )
+        payload = response_budget.prepare_payload(
             persona_id=request.persona_id,
             persona_name=request.persona_name,
             language=infer_response_language(request.trainee_input, request.language),
@@ -477,6 +534,25 @@ class BehaviorService:
             academic_behavior=request.academic_behavior,
         )
         payload_json = json.dumps(payload, ensure_ascii=False)
+        full_prompt_estimate = (
+            estimate_tokens(BEHAVIOR_INSTRUCTIONS)
+            + estimate_tokens(json.dumps(BEHAVIOR_RESPONSE_SCHEMA, ensure_ascii=False))
+            + estimate_tokens(payload_json)
+            + 8
+        )
+        if self.budget.reserve_prompt_overhead and full_prompt_estimate > self.budget.max_input_tokens:
+            self._last_latency_ms["llm_generation"] = 0.0
+            logger.warning(
+                "Behavior prompt exceeds configured input budget persona=%s estimated_tokens=%d limit=%d; using local fallback",
+                request.persona_id,
+                full_prompt_estimate,
+                self.budget.max_input_tokens,
+            )
+            return self._apply_academic_decision(
+                self._fallback(request, ValueError("prompt exceeds configured input budget")),
+                request,
+                academic_decision,
+            )
 
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
@@ -487,18 +563,9 @@ class BehaviorService:
                     config={
                         "system_instruction": BEHAVIOR_INSTRUCTIONS,
                         "max_output_tokens": self.budget.max_output_tokens,
+                        "usage_category": "student_behavior",
                         "response_mime_type": "application/json",
-                        "response_schema": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "persona_id": {"type": "STRING"},
-                                "dialogue": {"type": "STRING"},
-                                "emotion": {"type": "STRING"},
-                                "action": {"type": "STRING", "enum": ACTION_VALUES},
-                                "speak": {"type": "BOOLEAN"},
-                            },
-                            "required": ["persona_id", "dialogue", "emotion", "action", "speak"],
-                        },
+                        "response_schema": BEHAVIOR_RESPONSE_SCHEMA,
                     },
                 )
                 self._last_latency_ms["llm_generation"] = round((time.perf_counter() - llm_started) * 1000, 2)
@@ -530,12 +597,12 @@ class BehaviorService:
                 )
                 return result
             except (json.JSONDecodeError, ValidationError) as error:
-                logger.warning("Qwen behavior response validation failed: %s", type(error).__name__)
+                logger.warning("OpenAI behavior response validation failed: %s", type(error).__name__)
                 return self._apply_academic_decision(
                     self._fallback(request, error), request, academic_decision
                 )
             except Exception as error:  # Provider and parsing failures use the bounded fallback.
-                logger.warning("Qwen behavior request failed: %s", type(error).__name__)
+                logger.warning("OpenAI behavior request failed: %s", type(error).__name__)
                 last_error = error
                 if getattr(error, "code", None) in (400, 401, 403, 404):
                     break
@@ -630,7 +697,7 @@ class BehaviorService:
 
     def _client(self) -> Any:
         if self.client is None:
-            self.client = create_ollama_client()
+            self.client = create_openai_client()
         return self.client
 
     @staticmethod

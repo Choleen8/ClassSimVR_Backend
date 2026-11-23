@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass
 from typing import Any
 
 
 def estimate_tokens(value: str) -> int:
-    """Estimate tokens conservatively enough for bounded prompt construction."""
+    """Roughly estimate text tokens; provider-reported usage is the exact measure."""
     return max(1, math.ceil(len(value) / 4))
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        configured = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        configured = default
+    return min(maximum, max(minimum, configured))
 
 
 @dataclass(frozen=True)
@@ -16,6 +25,36 @@ class TokenBudget:
     max_input_tokens: int = 1_200
     max_output_tokens: int = 180
     recent_turn_limit: int = 6
+    reserve_prompt_overhead: bool = False
+
+    @classmethod
+    def from_env(cls) -> "TokenBudget":
+        return cls(
+            max_input_tokens=_bounded_env_int(
+                "OPENAI_BEHAVIOR_MAX_INPUT_TOKENS", 1_200, 512, 4_096
+            ),
+            max_output_tokens=_bounded_env_int(
+                "OPENAI_BEHAVIOR_MAX_OUTPUT_TOKENS", 180, 64, 512
+            ),
+            recent_turn_limit=_bounded_env_int(
+                "OPENAI_BEHAVIOR_RECENT_TURN_LIMIT", 6, 0, 12
+            ),
+            reserve_prompt_overhead=True,
+        )
+
+    def payload_budget(self, *, system_instruction: str, response_schema: dict[str, Any]) -> "TokenBudget":
+        """Reserve input capacity for prompt instructions, schema, and message framing."""
+        if not self.reserve_prompt_overhead:
+            return self
+        reserved = estimate_tokens(system_instruction)
+        reserved += estimate_tokens(json.dumps(response_schema, ensure_ascii=False))
+        reserved += 8  # role labels and provider framing
+        return TokenBudget(
+            max_input_tokens=max(1, self.max_input_tokens - reserved),
+            max_output_tokens=self.max_output_tokens,
+            recent_turn_limit=self.recent_turn_limit,
+            reserve_prompt_overhead=True,
+        )
 
     def prepare_context(
         self,
