@@ -624,6 +624,8 @@ def test_routes_everyone_to_all_default_students():
         "maria-sandoval", "robert-eco", "ethan-luna", "andrea-guinto", "judy-castillo", "francis-reyes",
         "dave-santos", "juan-cruz",
         "eva-mendoza", "ara-villanueva", "kate-navarro",
+        "ayesha-ramirez", "maelyn-garcia",
+        "amira-salazar", "justin-mercado",
     ]
     assert all(item.action == "SIT" for item in result.responses)
 

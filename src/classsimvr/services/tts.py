@@ -34,6 +34,10 @@ DEFAULT_VOICE_BY_PERSONA = {
     "eva-mendoza": "en-US-EmmaNeural",
     "ara-villanueva": "en-US-AvaNeural",
     "kate-navarro": "en-US-MichelleNeural",
+    "ayesha-ramirez": "en-PH-RosaNeural",
+    "maelyn-garcia": "en-GB-SoniaNeural",
+    "amira-salazar": "en-US-AnaNeural",
+    "justin-mercado": "en-PH-JamesNeural",
 }
 
 

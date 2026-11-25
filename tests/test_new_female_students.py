@@ -1,4 +1,4 @@
-"""Registration and shared behavior regressions for Eva, Ara, and Kate."""
+"""Registration and shared behavior regressions for the female student additions."""
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -21,6 +21,8 @@ STUDENTS = [
     ("eva-mendoza", "Eva Mendoza", "ADVANCED", "en-US-EmmaNeural"),
     ("ara-villanueva", "Ara Villanueva", "INTERMEDIATE", "en-US-AvaNeural"),
     ("kate-navarro", "Kate Navarro", "BEGINNER", "en-US-MichelleNeural"),
+    ("ayesha-ramirez", "Ayesha Ramirez", "ADVANCED", "en-PH-RosaNeural"),
+    ("maelyn-garcia", "Maelyn Garcia", "INTERMEDIATE", "en-GB-SoniaNeural"),
 ]
 
 
@@ -70,6 +72,19 @@ def test_first_and_full_name_acknowledgments_stand_and_sit_use_own_voice(student
             assert tts.calls[-1][1]["voice"] == voice
             if action == "NONE":
                 assert reply.dialogue == "Yes, Ma'am!"
+
+
+@pytest.mark.parametrize("transcript,student_id", [
+    ("Aisha, please stand up.", "ayesha-ramirez"),
+    ("Maelin, please stand up.", "maelyn-garcia"),
+    ("Maylin, please stand up.", "maelyn-garcia"),
+])
+def test_new_spoken_aliases_route_to_canonical_actor_tags(transcript, student_id):
+    router = MicrophoneCommandRouter(behavior=BehaviorService(client=object()), tts=RecordingTTS())
+    result = router.handle(transcript, session_id="spoken-aliases")
+    assert result.target == student_id
+    reply, = result.responses
+    assert (reply.persona_id, reply.action) == (student_id, "STAND")
 
 
 @pytest.mark.parametrize("student_id,name,ability,voice", STUDENTS)
@@ -135,7 +150,7 @@ def test_new_students_raise_and_lower_hands_through_shared_group_flow():
 
 def test_existing_profiles_do_not_opt_into_changed_academic_policy():
     registry = StudentRegistry.with_defaults()
-    new_ids = {row[0] for row in STUDENTS}
+    new_ids = {row[0] for row in STUDENTS} | {"amira-salazar", "justin-mercado"}
     assert {s.student_id for s in registry.list_students() if s.academic_behavior_enabled} == new_ids
     assert registry.resolve("Maria").student_id == "maria-sandoval"
     assert registry.resolve("Andrea").student_id == "andrea-guinto"
@@ -143,7 +158,7 @@ def test_existing_profiles_do_not_opt_into_changed_academic_policy():
     assert all(name in prompt for _, name, *_ in STUDENTS)
 
 
-def test_default_voice_mapping_renders_three_distinct_ready_files(tmp_path, monkeypatch):
+def test_default_voice_mapping_renders_distinct_ready_files(tmp_path, monkeypatch):
     calls = []
     tts = TextToSpeechService(output_dir=tmp_path)
 
@@ -156,7 +171,7 @@ def test_default_voice_mapping_renders_three_distinct_ready_files(tmp_path, monk
     monkeypatch.setattr(tts, "_run_async", render)
     urls = [tts.synthesize("Yes, Ma'am!", "female-voice-test", persona_id=sid) for sid, *_ in STUDENTS]
     assert calls == [row[3] for row in STUDENTS]
-    assert len(set(urls)) == 3
+    assert len(set(urls)) == len(STUDENTS)
     assert all((tmp_path / url.rsplit("/", 1)[-1]).read_bytes() for url in urls)
 
 

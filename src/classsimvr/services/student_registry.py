@@ -295,6 +295,74 @@ DEFAULT_STUDENT_PROFILES = (
         supported_actions=THINKING_STUDENT_ACTIONS,
         academic_behavior_enabled=True,
     ),
+    StudentProfile(
+        student_id="ayesha-ramirez",
+        name="Ayesha Ramirez",
+        aliases=("ayesha", "ayesha ramirez", "aisha"),
+        personality=(
+            "Ayesha is an attentive, articulate, respectful Filipino VR student. "
+            "She explains familiar ideas clearly and enjoys helping classmates."
+        ),
+        language="English",
+        voice="en-PH-RosaNeural",
+        knowledge_level="ADVANCED",
+        confidence=0.75,
+        willingness=0.7,
+        gender="female",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+        academic_behavior_enabled=True,
+    ),
+    StudentProfile(
+        student_id="maelyn-garcia",
+        name="Maelyn Garcia",
+        aliases=("maelyn", "maelyn garcia", "maelin", "maylin"),
+        personality=(
+            "Maelyn is a friendly, observant, respectful Filipino VR student. "
+            "She is curious about new topics and takes her time with difficult questions."
+        ),
+        language="English",
+        voice="en-GB-SoniaNeural",
+        knowledge_level="INTERMEDIATE",
+        confidence=0.6,
+        willingness=0.6,
+        gender="female",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+        academic_behavior_enabled=True,
+    ),
+    StudentProfile(
+        student_id="amira-salazar",
+        name="Amira Salazar",
+        aliases=("amira", "amira salazar"),
+        personality=(
+            "Amira is a cheerful, considerate Filipino VR student. "
+            "She learns from concrete examples and sometimes needs help explaining unfamiliar ideas."
+        ),
+        language="English",
+        voice="en-US-AnaNeural",
+        knowledge_level="BEGINNER",
+        confidence=0.48,
+        willingness=0.62,
+        gender="female",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+        academic_behavior_enabled=True,
+    ),
+    StudentProfile(
+        student_id="justin-mercado",
+        name="Justin Mercado",
+        aliases=("justin", "justin mercado"),
+        personality=(
+            "Justin is a friendly, practical, respectful Filipino VR student. "
+            "He likes giving examples from everyday life and takes time to reason through harder questions."
+        ),
+        language="English",
+        voice="en-PH-JamesNeural",
+        knowledge_level="INTERMEDIATE",
+        confidence=0.63,
+        willingness=0.6,
+        gender="male",
+        supported_actions=THINKING_STUDENT_ACTIONS,
+        academic_behavior_enabled=True,
+    ),
 )
 
 

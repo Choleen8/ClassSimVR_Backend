@@ -78,6 +78,10 @@ class _OpenAIModels:
 
         try:
             response = self._client.chat.completions.create(**kwargs)
+        except ModuleNotFoundError as error:
+            # The SDK lazily imports native dependencies when loading this endpoint.
+            logger.warning("OpenAI SDK dependency could not be imported: %s", error.name or "unknown")
+            raise OpenAIConfigurationError("OpenAI SDK dependency is unavailable") from error
         except APIStatusError as error:
             raise OpenAIAPIError(
                 f"OpenAI returned HTTP {error.status_code}.", error.status_code

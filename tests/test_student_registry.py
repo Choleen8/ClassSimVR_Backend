@@ -216,6 +216,7 @@ def test_default_robert_profile_uses_canonical_actor_persona_id_and_all_aliases(
 
 def test_legacy_berto_id_is_migrated_without_creating_duplicate_student():
     registry = StudentRegistry.with_defaults()
+    initial_student_ids = [profile.student_id for profile in registry.list_students()]
     loaded = registry.load_json(
         json.dumps(
             [
@@ -232,8 +233,9 @@ def test_legacy_berto_id_is_migrated_without_creating_duplicate_student():
     )
 
     assert [profile.student_id for profile in loaded] == ["robert-eco"]
-    assert [profile.student_id for profile in registry.list_students()].count("robert-eco") == 1
-    assert len(registry.list_students()) == 11
+    student_ids = [profile.student_id for profile in registry.list_students()]
+    assert student_ids.count("robert-eco") == 1
+    assert student_ids == initial_student_ids
 
 
 def test_registry_keeps_chronological_conversation_memory_per_student_and_session():
