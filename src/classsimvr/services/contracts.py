@@ -3,6 +3,9 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+from .session_contracts import ClassroomContext
+
+
 class TokenUsage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
@@ -24,6 +27,7 @@ class BehaviorRequest(BaseModel):
     acknowledgment_required: bool = True
     knowledge_level: str = Field(default="INTERMEDIATE", max_length=20)
     grade_level: str | None = Field(default=None, max_length=20)
+    classroom_context: ClassroomContext | None = None
     academic_difficulty: str | None = Field(default=None, max_length=20)
     academic_behavior: str | None = Field(default=None, max_length=20)
     academic_behavior_enabled: bool = False

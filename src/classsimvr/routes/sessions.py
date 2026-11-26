@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session as DbSession
 
 from ..database import get_session
+from ..models import Session
+from ..services.transcript_assessment import lock_session
+from ..services.auth import bearer_scheme, get_current_account
 from ..services.persona_contracts import AssignedPersonaResponse
 from ..services.session_contracts import (
     GeneratedClassResponse,
@@ -20,6 +27,7 @@ from ..services.sessions import (
 )
 from ..services.personas import SessionNotFoundError, TraineeNotFoundError
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
 
 
@@ -50,9 +58,19 @@ def create_session(
     data: SessionCreate,
     db: DbSession = Depends(get_session),
     service: SessionService = Depends(get_session_service),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> SessionResponse:
     try:
+        if data.start_immediately:
+            account = get_current_account(credentials, db)
+            if account.trainee_id != data.trainee_id:
+                raise HTTPException(status_code=403, detail="classroom session must belong to the signed-in trainee")
         return _session_response(service.create_session(db, data))
+    except SQLAlchemyError as error:
+        if not data.start_immediately:
+            raise
+        logger.warning("Classroom session creation failed: %s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="classroom session is unavailable") from error
     except TraineeNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -89,12 +107,15 @@ def get_trainee_history(
     trainee_id: int,
     db: DbSession = Depends(get_session),
     service: SessionService = Depends(get_session_service),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> list[TraineeHistoryResponse]:
     try:
         sessions = service.list_history(db, trainee_id)
     except TraineeNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
-    return [_history_response(session) for session in sessions]
+    owns_history = credentials is not None and get_current_account(credentials, db).trainee_id == trainee_id
+    return [_history_response(session) for session in sessions
+            if session.assessment_started_at is None or (owns_history and session.assessment_status == "gradable")]
 
 
 def _student_response(assignment) -> AssignedPersonaResponse:
@@ -157,8 +178,11 @@ def _lifecycle_response(session) -> SessionLifecycleResponse:
     )
 
 
-def _transition(service_method, session_id: int, db: DbSession, service: SessionService):
+def _transition(service_method, session_id: int, db: DbSession):
     try:
+        session = lock_session(db, session_id)
+        if session is not None and session.assessment_started_at is not None:
+            raise HTTPException(status_code=409, detail="The timed assessment manages its own lifecycle.")
         return _lifecycle_response(service_method(db, session_id))
     except SessionNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -172,7 +196,7 @@ def start_session(
     db: DbSession = Depends(get_session),
     service: SessionService = Depends(get_session_service),
 ) -> SessionLifecycleResponse:
-    return _transition(service.start_session, session_id, db, service)
+    return _transition(service.start_session, session_id, db)
 
 
 @router.post("/sessions/{session_id}/pause", response_model=SessionLifecycleResponse)
@@ -181,7 +205,7 @@ def pause_session(
     db: DbSession = Depends(get_session),
     service: SessionService = Depends(get_session_service),
 ) -> SessionLifecycleResponse:
-    return _transition(service.pause_session, session_id, db, service)
+    return _transition(service.pause_session, session_id, db)
 
 
 @router.post("/sessions/{session_id}/resume", response_model=SessionLifecycleResponse)
@@ -190,7 +214,7 @@ def resume_session(
     db: DbSession = Depends(get_session),
     service: SessionService = Depends(get_session_service),
 ) -> SessionLifecycleResponse:
-    return _transition(service.resume_session, session_id, db, service)
+    return _transition(service.resume_session, session_id, db)
 
 
 @router.post("/sessions/{session_id}/complete", response_model=SessionLifecycleResponse)
@@ -199,7 +223,7 @@ def complete_session(
     db: DbSession = Depends(get_session),
     service: SessionService = Depends(get_session_service),
 ) -> SessionLifecycleResponse:
-    return _transition(service.complete_session, session_id, db, service)
+    return _transition(service.complete_session, session_id, db)
 
 
 @router.post("/sessions/{session_id}/reset", response_model=SessionLifecycleResponse)
@@ -209,6 +233,9 @@ def reset_session(
     service: SessionService = Depends(get_session_service),
 ) -> SessionLifecycleResponse:
     try:
+        session = lock_session(db, session_id)
+        if session is not None and session.assessment_started_at is not None:
+            raise HTTPException(status_code=409, detail="Start a new classroom instead of resetting a timed assessment.")
         return _lifecycle_response(service.reset_session(db, session_id))
     except SessionNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error

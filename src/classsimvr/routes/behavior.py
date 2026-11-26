@@ -14,6 +14,8 @@ from ..services.personas import (
 )
 from ..services.tts import TextToSpeechService
 
+from ..services.session_contracts import ClassroomContext, ELEMENTARY_GRADES
+
 router = APIRouter()
 
 
@@ -161,7 +163,15 @@ def create_versioned_behavior_turn(
         )
         if value
     )
+    session = assignment.session
+    context = None
+    if session.subject and session.grade in ELEMENTARY_GRADES:
+        try:
+            context = ClassroomContext.from_selection(session.grade, session.subject, session.session_mode)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail="classroom session has no valid subject context") from error
     request = BehaviorRequest(
+        classroom_context=context,
         session_id=str(session_id),
         persona_id=str(persona_id),
         persona_name=persona.name,

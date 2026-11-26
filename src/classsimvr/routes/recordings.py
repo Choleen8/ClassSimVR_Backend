@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session as DbSession
 
 from ..database import get_session
+from ..models import Session
+from ..services.auth import bearer_scheme, get_current_account
 from ..services.personas import SessionNotFoundError
 from ..services.recording_contracts import (
     ConsentRequest,
@@ -25,13 +28,22 @@ def get_recording_service() -> RecordingService:
     return RecordingService()
 
 
+def _protect_assessment_recording(db, session_id, credentials):
+    session = db.get(Session, session_id)
+    if session is not None and session.session_mode == "assessment":
+        if get_current_account(credentials, db).trainee_id != session.trainee_id:
+            raise HTTPException(status_code=404, detail="classroom session was not found")
+
+
 @router.put("/sessions/{session_id}/consent", response_model=ConsentResponse)
 def set_consent(
     session_id: int,
     data: ConsentRequest,
     db: DbSession = Depends(get_session),
     service: RecordingService = Depends(get_recording_service),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> ConsentResponse:
+    _protect_assessment_recording(db, session_id, credentials)
     try:
         consent = service.set_consent(db, session_id, data)
     except SessionNotFoundError as error:
@@ -51,7 +63,9 @@ def withdraw_consent(
     session_id: int,
     db: DbSession = Depends(get_session),
     service: RecordingService = Depends(get_recording_service),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> ConsentResponse:
+    _protect_assessment_recording(db, session_id, credentials)
     try:
         consent = service.withdraw_consent(db, session_id)
     except SessionNotFoundError as error:
@@ -91,7 +105,9 @@ def start_recording(
     data: RecordingStartRequest,
     db: DbSession = Depends(get_session),
     service: RecordingService = Depends(get_recording_service),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> RecordingResponse:
+    _protect_assessment_recording(db, session_id, credentials)
     try:
         return _recording_response(service.start_recording(db, session_id, data))
     except SessionNotFoundError as error:
@@ -109,7 +125,9 @@ def complete_recording(
     data: RecordingCompleteRequest,
     db: DbSession = Depends(get_session),
     service: RecordingService = Depends(get_recording_service),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> RecordingResponse:
+    _protect_assessment_recording(db, session_id, credentials)
     try:
         return _recording_response(service.complete_recording(db, session_id, data))
     except SessionNotFoundError as error:
@@ -128,7 +146,9 @@ async def upload_recording(
     file: UploadFile = File(...),
     db: DbSession = Depends(get_session),
     service: RecordingService = Depends(get_recording_service),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> RecordingResponse:
+    _protect_assessment_recording(db, session_id, credentials)
     try:
         recording = await service.save_upload(db, session_id, file, duration_s)
         return _recording_response(recording)

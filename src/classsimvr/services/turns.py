@@ -13,6 +13,8 @@ class TurnPersonaNotFoundError(LookupError):
 
 class TurnService:
     def create_turn(self, db: DbSession, session_id: int, data: TurnCreate) -> Turn:
+        if data.source and data.source.startswith("assessment:"):
+            raise TurnPersonaNotFoundError("turn source is reserved")
         if db.get(Session, session_id) is None:
             raise SessionNotFoundError(f"session {session_id} was not found")
         if db.get(SessionPersona, (session_id, data.persona_id)) is None:

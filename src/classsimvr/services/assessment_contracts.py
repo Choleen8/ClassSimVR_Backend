@@ -78,6 +78,7 @@ class ReportEvidenceResponse(BaseModel):
 
 class ReportIndicatorResponse(BaseModel):
     bti_code: str
+    title: str | None = None
     observed: bool
     score: int | None
     evidence: list[ReportEvidenceResponse]
@@ -89,6 +90,7 @@ class ReportResponse(BaseModel):
     next_focus: str | None
     model_assess: str | None
     indicators: list[ReportIndicatorResponse]
+    transcript_feedback: dict | None = None
 
 
 def _rubric(

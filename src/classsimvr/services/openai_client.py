@@ -125,11 +125,12 @@ class OpenAIBehaviorClient:
         self.models = _OpenAIModels(client)
 
 
-def create_openai_client(api_key: str | None = None) -> OpenAIBehaviorClient:
+def create_openai_client(api_key: str | None = None, *, timeout: float | None = None) -> OpenAIBehaviorClient:
     load_dotenv()
     key = api_key or os.getenv("OPENAI_API_KEY")
     if not key:
         raise OpenAIConfigurationError("OPENAI_API_KEY is not configured")
     # BehaviorService owns the single bounded retry policy. Disable the SDK's
     # automatic retries so a transient error cannot multiply billable requests.
-    return OpenAIBehaviorClient(OpenAI(api_key=key, max_retries=0))
+    options = {"timeout": timeout} if timeout is not None else {}
+    return OpenAIBehaviorClient(OpenAI(api_key=key, max_retries=0, **options))

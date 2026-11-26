@@ -19,6 +19,8 @@ from .openai_client import create_openai_client
 from .token_budget import TokenBudget
 from .token_budget import estimate_tokens
 from .student_registry import normalize_grade_level
+from .session_contracts import ClassroomContext
+from hashlib import sha256
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,29 @@ BEHAVIOR_RESPONSE_SCHEMA = {
         "speak": {"type": "BOOLEAN"},
     },
     "required": ["persona_id", "dialogue", "emotion", "action", "speak"],
+}
+
+CLASSROOM_SCOPE_INSTRUCTIONS = """
+Use classroom_session for the active grade, subject, and mode. Classify the teacher's latest
+request in subject_relation: RELATED for academic content supporting the lesson (including
+cross-disciplinary examples), UNRELATED only for clearly off-subject academics, OTHER for
+greetings, classroom directions, recall, clarification, or ambiguous requests.
+For UNRELATED, give no lesson answer. Follow the teacher's English, Filipino, or Taglish
+in every subject. The subject is academic scope, independent of the spoken language.
+Keep the learner's own personality and depth appropriate to knowledge_level.
+"""
+SCOPED_BEHAVIOR_INSTRUCTIONS = BEHAVIOR_INSTRUCTIONS.replace(
+    "persona_id, dialogue, emotion, action, speak.",
+    "persona_id, dialogue, emotion, action, speak, subject_relation.",
+) + CLASSROOM_SCOPE_INSTRUCTIONS
+SUBJECT_RELATIONS = ("RELATED", "UNRELATED", "OTHER")
+SCOPED_RESPONSE_SCHEMA = {
+    **BEHAVIOR_RESPONSE_SCHEMA,
+    "properties": {
+        **BEHAVIOR_RESPONSE_SCHEMA["properties"],
+        "subject_relation": {"type": "STRING", "enum": list(SUBJECT_RELATIONS)},
+    },
+    "required": [*BEHAVIOR_RESPONSE_SCHEMA["required"], "subject_relation"],
 }
 
 VOLUNTEER_RESPONSE_SCHEMA = {
@@ -162,6 +187,7 @@ _CONVERSATIONAL_PATTERNS = (
     r"\bwho are you\b",
     r"\bmagpakilala\b",
     r"\bpakilala ka\b",
+    r"\b(?:hello|hi|good morning|good afternoon|kumusta|kamusta|magandang umaga|magandang hapon)\b",
 )
 
 _BEYOND_SCHOOL_TOPIC_PATTERNS = (
@@ -303,6 +329,7 @@ class BehaviorService:
         students: list[Any],
         *,
         round_number: int = 0,
+        classroom_context: ClassroomContext | None = None,
     ) -> dict[str, str]:
         """Make one validated, independent volunteer decision for every student."""
         if not question.strip() or not students:
@@ -331,6 +358,9 @@ class BehaviorService:
             "decisions, one entry per listed persona_id. action must be exactly RAISE_HAND or "
             "NONE. Volunteers remain seated and silent; do not generate dialogue."
         )
+        if classroom_context:
+            payload["classroom_session"] = classroom_context.prompt_context()
+            instruction += " Consider the active grade and subject; choose NONE for a clearly unrelated academic question."
         input_cap = _bounded_env_int("OPENAI_CLASSROOM_MAX_INPUT_TOKENS", 2_400, 1_024, 6_000)
         output_cap = _bounded_env_int("OPENAI_CLASSROOM_MAX_OUTPUT_TOKENS", 1_024, 256, 2_048)
         input_budget = TokenBudget(
@@ -446,11 +476,15 @@ class BehaviorService:
         if request.clarification_required:
             self._last_latency_ms["llm_generation"] = 0.0
             return self._clarification_reply(request)
-        if (
+        classroom = request.classroom_context
+        if classroom:
+            request = request.model_copy(update={"grade_level": classroom.grade})
+        beyond_grade = (
             _is_beyond_grade_level(request.trainee_input, request.grade_level)
             and "THINKING" in request.supported_actions
             and "IDK" in request.supported_actions
-        ):
+        )
+        if beyond_grade and classroom is None:
             self._last_latency_ms["llm_generation"] = 0.0
             return _grade_limited_reply(request)
         if intent.action != "NONE" and not intent.speak:
@@ -502,7 +536,7 @@ class BehaviorService:
                 academic_decision.difficulty.value,
                 academic_decision.behavior.value,
             )
-            if academic_decision.behavior == SelectedBehavior.IDK:
+            if academic_decision.behavior == SelectedBehavior.IDK and classroom is None:
                 self._last_latency_ms["llm_generation"] = 0.0
                 reply = self._idk_reply(request)
                 logger.debug(
@@ -511,10 +545,17 @@ class BehaviorService:
                 )
                 return reply
 
+        def local_reply(error: Exception | None) -> BehaviorResponse:
+            if beyond_grade:
+                return _grade_limited_reply(request)
+            return self._apply_academic_decision(self._fallback(request, error), request, academic_decision)
+
+        instruction = SCOPED_BEHAVIOR_INSTRUCTIONS if classroom else BEHAVIOR_INSTRUCTIONS
+        schema = SCOPED_RESPONSE_SCHEMA if classroom else BEHAVIOR_RESPONSE_SCHEMA
         llm_started = time.perf_counter()
         response_budget = self.budget.payload_budget(
-            system_instruction=BEHAVIOR_INSTRUCTIONS,
-            response_schema=BEHAVIOR_RESPONSE_SCHEMA,
+            system_instruction=instruction,
+            response_schema=schema,
         )
         payload = response_budget.prepare_payload(
             persona_id=request.persona_id,
@@ -532,11 +573,12 @@ class BehaviorService:
             supported_actions=request.supported_actions,
             academic_difficulty=request.academic_difficulty,
             academic_behavior=request.academic_behavior,
+            classroom_context=classroom.prompt_context() if classroom else None,
         )
         payload_json = json.dumps(payload, ensure_ascii=False)
         full_prompt_estimate = (
-            estimate_tokens(BEHAVIOR_INSTRUCTIONS)
-            + estimate_tokens(json.dumps(BEHAVIOR_RESPONSE_SCHEMA, ensure_ascii=False))
+            estimate_tokens(instruction)
+            + estimate_tokens(json.dumps(schema, ensure_ascii=False))
             + estimate_tokens(payload_json)
             + 8
         )
@@ -548,11 +590,7 @@ class BehaviorService:
                 full_prompt_estimate,
                 self.budget.max_input_tokens,
             )
-            return self._apply_academic_decision(
-                self._fallback(request, ValueError("prompt exceeds configured input budget")),
-                request,
-                academic_decision,
-            )
+            return local_reply(ValueError("prompt exceeds configured input budget"))
 
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
@@ -561,21 +599,27 @@ class BehaviorService:
                     model=self.model,
                     contents=payload_json,
                     config={
-                        "system_instruction": BEHAVIOR_INSTRUCTIONS,
+                        "system_instruction": instruction,
                         "max_output_tokens": self.budget.max_output_tokens,
                         "usage_category": "student_behavior",
                         "response_mime_type": "application/json",
-                        "response_schema": BEHAVIOR_RESPONSE_SCHEMA,
+                        "response_schema": schema,
                     },
                 )
                 self._last_latency_ms["llm_generation"] = round((time.perf_counter() - llm_started) * 1000, 2)
-                result = BehaviorResponse.model_validate(json.loads(response.text))
-                if result.persona_id != request.persona_id:
-                    return self._apply_academic_decision(
-                        self._fallback(request, ValueError("model returned the wrong persona")),
-                        request,
-                        academic_decision,
-                    )
+                data = json.loads(response.text)
+                relation = data.pop("subject_relation", None) if classroom and isinstance(data, dict) else None
+                result = BehaviorResponse.model_validate(data)
+                if result.persona_id != request.persona_id or (classroom and relation not in SUBJECT_RELATIONS):
+                    return local_reply(ValueError("invalid response persona or subject classification"))
+                if classroom and relation == "UNRELATED":
+                    reply = self._subject_redirect(request, classroom, intent)
+                    reply.usage = self._usage(response)
+                    return reply
+                if beyond_grade or (academic_decision and academic_decision.behavior == SelectedBehavior.IDK):
+                    reply = _grade_limited_reply(request) if beyond_grade else self._idk_reply(request)
+                    reply.usage = self._usage(response)
+                    return reply
                 result = self._normalize_result(result, request, intent)
                 if (
                     academic_decision is not None
@@ -598,9 +642,7 @@ class BehaviorService:
                 return result
             except (json.JSONDecodeError, ValidationError) as error:
                 logger.warning("OpenAI behavior response validation failed: %s", type(error).__name__)
-                return self._apply_academic_decision(
-                    self._fallback(request, error), request, academic_decision
-                )
+                return local_reply(error)
             except Exception as error:  # Provider and parsing failures use the bounded fallback.
                 logger.warning("OpenAI behavior request failed: %s", type(error).__name__)
                 last_error = error
@@ -610,9 +652,7 @@ class BehaviorService:
         self._last_latency_ms["llm_generation"] = round(
             (time.perf_counter() - llm_started) * 1000, 2
         )
-        return self._apply_academic_decision(
-            self._fallback(request, last_error), request, academic_decision
-        )
+        return local_reply(last_error)
 
     def _timed_generation(self, **kwargs):
         started = time.perf_counter()
@@ -681,7 +721,37 @@ class BehaviorService:
         return reply
 
     @staticmethod
+    def _subject_redirect(request: BehaviorRequest, classroom: ClassroomContext, intent: TeacherIntent) -> BehaviorResponse:
+        language = infer_response_language(request.trainee_input, request.language)
+        subject = classroom.subject_label
+        options = {
+            "Filipino": (
+                f"Ibang paksa po iyon, Ma'am. {subject} po ang aralin natin ngayon. Maaari po nating balikan iyon mamaya?",
+                f"Ma'am, puwede po bang bumalik muna tayo sa {subject}? Ibang aralin po ang tanong na iyon.",
+                f"Sa ibang aralin po yata iyan. May tanong pa po ba kayo tungkol sa {subject}, Ma'am?",
+            ),
+            "Taglish": (
+                f"Ma'am, ibang topic po iyon. Can we go back to our {subject} lesson?",
+                f"That belongs in another class po. Puwede po nating balikan after {subject}?",
+                f"Ma'am, {subject} po ang lesson namin ngayon. Could we try a question about that?",
+            ),
+            "English": (
+                f"That's for a different subject, Ma'am. Could we go back to our {subject} lesson?",
+                f"Could we save that for another lesson, Ma'am? We're working on {subject} right now.",
+                f"I think that's a different class topic, Ma'am. Do you have a question about {subject}?",
+            ),
+        }.get(language)
+        variants = options or (
+            f"That's for a different subject, Ma'am. Could we go back to our {subject} lesson?",
+        )
+        fingerprint = f"{request.persona_id}|{request.trainee_input.casefold()}".encode()
+        return BehaviorResponse(
+            persona_id=request.persona_id, dialogue=variants[sha256(fingerprint).digest()[0] % len(variants)],
+            emotion="respectful", action=intent.action, speak=True,
+        )
+
     def _normalize_result(
+        self,
         result: BehaviorResponse,
         request: BehaviorRequest,
         intent: TeacherIntent,
@@ -692,7 +762,7 @@ class BehaviorService:
         speak = intent.speak
         dialogue = result.dialogue.strip() if speak else ""
         if speak and not dialogue:
-            return BehaviorService._fallback(request, ValueError("spoken response was empty"))
+            return self._fallback(request, ValueError("spoken response was empty"))
         return result.model_copy(update={"action": action, "speak": speak, "dialogue": dialogue})
 
     def _client(self) -> Any:

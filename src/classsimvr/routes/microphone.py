@@ -8,7 +8,16 @@ import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session as DbSession
+
+from ..database import get_session
+from ..models import Session
+from ..services.auth import bearer_scheme, get_current_account
+from ..services.session_contracts import ClassroomContext
+from ..services.transcript_assessment import record_microphone_events
 
 from ..services.behavior import BehaviorService
 from ..services.contracts import BehaviorResponse
@@ -20,6 +29,38 @@ from .students import get_student_registry
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _is_classroom_session(session_id: str) -> bool:
+    return session_id.startswith("db:")
+
+
+def _classroom_context(
+    session_id: str, credentials: HTTPAuthorizationCredentials | None, db: DbSession,
+    *, require_running: bool = False,
+) -> ClassroomContext | None:
+    if not _is_classroom_session(session_id):
+        return None
+    value = session_id[3:]
+    if not value.isascii() or not value.isdecimal() or len(value) > 10:
+        raise HTTPException(status_code=409, detail="classroom session is not initialized")
+    key = int(value)
+    if not 0 < key <= 2**31 - 1 or str(key) != value:
+        raise HTTPException(status_code=409, detail="invalid classroom session identifier")
+    try:
+        account = get_current_account(credentials, db)
+        session = db.get(Session, key)
+        if session is None or session.trainee_id != account.trainee_id:
+            raise HTTPException(status_code=404, detail="classroom session was not found")
+        if require_running and session.status != "running":
+            raise HTTPException(status_code=409, detail="classroom session must be running")
+        try:
+            return ClassroomContext.from_selection(session.grade, session.subject, session.session_mode)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail="classroom session has no valid subject context") from error
+    except SQLAlchemyError as error:
+        logger.warning("Classroom microphone session lookup failed: %s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="classroom session is unavailable") from error
 
 
 class MicrophoneContextBody(BaseModel):
@@ -64,6 +105,8 @@ class ListeningCoordinator:
         self._lock = RLock()
         self._lifecycle_lock = RLock()
         self._context = MicrophoneContextBody()
+        self._classroom_context: ClassroomContext | None = None
+        self._listening = False
         self._queues: dict[str, deque[MicrophoneStopResponse]] = defaultdict(
             lambda: deque(maxlen=100)
         )
@@ -80,6 +123,7 @@ class ListeningCoordinator:
         self._recent_command_fingerprints: dict[str, float] = {}
         self._executed_command_ids: set[str] = set()
         self._last_command_id: str | None = None
+        self._assessment_evidence_failures: set[str] = set()
         self._duplicate_commands_dropped = 0
         self._stale_commands_dropped = 0
         self.listener = VoiceListeningService(
@@ -87,11 +131,17 @@ class ListeningCoordinator:
             student_names=tuple(student.name for student in self.router.registry.list_students()),
         )
 
-    def start(self, body: MicrophoneStartBody | None = None) -> dict:
+    def start(
+        self, body: MicrophoneStartBody | None = None, *, classroom_context: ClassroomContext | None = None,
+    ) -> dict:
         request = body or MicrophoneStartBody()
         with self._lifecycle_lock:
+            if self._listening:
+                raise MicrophoneBusyError("microphone listening is already enabled")
+            if _is_classroom_session(request.session_id) and classroom_context is None:
+                raise MicrophoneBusyError("classroom session is not initialized")
             selected_grade_level = self.router.registry.set_selected_grade_level(
-                request.session_id, request.selected_grade_level
+                request.session_id, classroom_context.grade if classroom_context else request.selected_grade_level
             )
             request = request.model_copy(update={"selected_grade_level": selected_grade_level})
             if request.reset_memory:
@@ -102,6 +152,7 @@ class ListeningCoordinator:
             with self._lock:
                 self._generation += 1
                 self._context = MicrophoneContextBody.model_validate(request.model_dump())
+                self._classroom_context = classroom_context
                 for response_queue in self._queues.values():
                     response_queue.clear()
                 for queue_times in self._queue_enqueued_at.values():
@@ -116,38 +167,61 @@ class ListeningCoordinator:
                 self._last_route_error = None
                 self._last_response_queue_ms = None
             status = self.listener.start(request.device_name)
+            self._listening = True
         status["mode"] = "toggle_listen"
         return status
 
     def stop(self, body: MicrophoneStopBody | None = None) -> MicrophoneStopResponse:
         with self._lifecycle_lock:
-            if body is not None:
+            session_id = body.session_id if body else self._context.session_id
+            self._check_capture_owner(session_id)
+            if body is not None and not _is_classroom_session(session_id):
                 with self._lock:
                     self._context = MicrophoneContextBody.model_validate(body.model_dump())
-            self.listener.stop()
+                    self._classroom_context = None
+            try:
+                self.listener.stop()
+            finally:
+                self._listening = False
             with self._lock:
                 self._generation += 1
-                session_id = self._context.session_id
             items = self.poll(session_id, limit=1, drain=True)
             if items:
                 return items[0]
             return MicrophoneStopResponse(transcript="", target="none", responses=[])
 
-    def pause(self, _session_id: str) -> dict:
-        return self.listener.pause()
+    def _check_capture_owner(self, session_id: str) -> None:
+        owner = self._context.session_id
+        if self._listening and session_id != owner and (
+            _is_classroom_session(owner) or _is_classroom_session(session_id)
+        ):
+            raise MicrophoneBusyError("microphone belongs to another classroom session")
 
-    def resume(self, _session_id: str) -> dict:
-        return self.listener.resume()
-
-    def cancel(self) -> dict:
+    def pause(self, session_id: str) -> dict:
         with self._lifecycle_lock:
+            self._check_capture_owner(session_id)
+            return self.listener.pause()
+
+    def resume(self, session_id: str) -> dict:
+        with self._lifecycle_lock:
+            self._check_capture_owner(session_id)
+            return self.listener.resume()
+
+    def cancel(self, session_id: str = "classroom") -> dict:
+        with self._lifecycle_lock:
+            self._check_capture_owner(session_id)
+            if _is_classroom_session(session_id) and session_id != self._context.session_id:
+                return {"state": "idle"}
             with self._lock:
                 self._generation += 1
                 for response_queue in self._queues.values():
                     response_queue.clear()
                 for queue_times in self._queue_enqueued_at.values():
                     queue_times.clear()
-            return self.listener.cancel()
+            try:
+                return self.listener.cancel()
+            finally:
+                self._listening = False
 
     def reset_memory(self, session_id: str) -> dict:
         with self._lock:
@@ -164,7 +238,10 @@ class ListeningCoordinator:
             status["last_error"] = self._last_error
             status["transcriptions_received"] = self._transcriptions_received
             status["routes_completed"] = self._routes_completed
-            status["last_routed_transcript"] = self._last_transcript
+            if self._classroom_context:
+                # The legacy status probe is unauthenticated and only needs capture state.
+                status["last_transcript"] = None
+            status["last_routed_transcript"] = None if self._classroom_context else self._last_transcript
             status["last_route_error"] = self._last_route_error
             status["command_generation"] = self._generation
             status["last_command_id"] = self._last_command_id
@@ -213,6 +290,7 @@ class ListeningCoordinator:
     def _on_transcription(self, transcript: str) -> None:
         with self._lock:
             context = self._context
+            classroom_context = self._classroom_context
             generation = self._generation
             self._transcriptions_received += 1
             self._last_transcript = transcript
@@ -224,25 +302,32 @@ class ListeningCoordinator:
             if previous is not None and now - previous < 2.0:
                 self._duplicate_commands_dropped += 1
                 logger.warning(
-                    "Dropped duplicate microphone command session=%s transcript=%r",
+                    "Dropped duplicate microphone command session=%s",
                     context.session_id,
-                    transcript,
                 )
                 return
             self._recent_command_fingerprints[fingerprint] = now
             command_id = f"{generation}-{uuid.uuid4().hex}"
             self._last_command_id = command_id
         logger.info(
-            "Routing transcription command_id=%s generation=%s session=%s transcript=%r",
+            "Routing transcription command_id=%s generation=%s session=%s",
             command_id,
             generation,
             context.session_id,
-            transcript,
         )
         speech_end_at, capture_stages = getattr(
             self.listener, "current_command_timing", lambda: (None, {})
         )()
         end_to_end_started = speech_end_at or time.perf_counter()
+        assess = classroom_context is not None and classroom_context.session_mode == "assessment"
+        first = last = None
+        if assess:
+            bounds = self.listener.current_speech_bounds()
+            if isinstance(bounds, tuple):
+                first, last = bounds
+            if not record_microphone_events(context.session_id, first, last, transcript=transcript):
+                with self._lock:
+                    self._assessment_evidence_failures.add(context.session_id)
         try:
             result = self.router.handle(
                 transcript,
@@ -252,6 +337,7 @@ class ListeningCoordinator:
                 recent_turns=context.recent_turns,
                 default_persona_id=context.default_persona_id,
                 selected_grade_level=context.selected_grade_level,
+                **({"classroom_context": classroom_context} if classroom_context else {}),
             )
             item = MicrophoneStopResponse(
                 transcript=transcript,
@@ -283,6 +369,10 @@ class ListeningCoordinator:
                 )
                 self._set_router_latency("response_queue", self._last_response_queue_ms)
                 self._set_router_latency("total_response", total_response_ms)
+            if assess:
+                if not record_microphone_events(context.session_id, first, last, queued_at=queue_started, responses=result.responses):
+                    with self._lock:
+                        self._assessment_evidence_failures.add(context.session_id)
             logger.info(
                 "Response queued command_id=%s session=%s target=%s action=%s responses=%s",
                 command_id,
@@ -313,6 +403,19 @@ class ListeningCoordinator:
         if isinstance(latency, dict):
             latency[stage] = value
 
+    def drain_assessment_evidence(self, session_id: str, cutoff: float) -> bool:
+        deadline = time.perf_counter() + 25.0
+        while time.perf_counter() < deadline:
+            with self._lock:
+                if session_id in self._assessment_evidence_failures:
+                    return False
+                if self._context.session_id != session_id:
+                    return True
+            if not self.listener.has_pending_assessment_audio(cutoff):
+                return True
+            time.sleep(0.05)
+        return False
+
 
 microphone_manager = ListeningCoordinator()
 
@@ -329,10 +432,13 @@ def get_microphone_router() -> MicrophoneCommandRouter:
 def start_microphone(
     body: MicrophoneStartBody | None = None,
     manager: ListeningCoordinator = Depends(get_microphone_manager),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: DbSession = Depends(get_session),
 ) -> dict:
+    classroom = _classroom_context((body or MicrophoneStartBody()).session_id, credentials, db, require_running=True)
     try:
         if isinstance(manager, ListeningCoordinator):
-            return manager.start(body)
+            return manager.start(body, classroom_context=classroom)
         return manager.start(body.device_name if body else None)
     except MicrophoneBusyError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
@@ -346,10 +452,14 @@ def stop_microphone(
     body: MicrophoneStopBody | None = None,
     manager: ListeningCoordinator = Depends(get_microphone_manager),
     command_router: MicrophoneCommandRouter = Depends(get_microphone_router),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: DbSession = Depends(get_session),
 ) -> MicrophoneStopResponse:
+    resolved_body = body or MicrophoneStopBody()
+    _classroom_context(resolved_body.session_id, credentials, db)
     try:
         if isinstance(manager, ListeningCoordinator):
-            return manager.stop(body)
+            return manager.stop(resolved_body)
         transcription: TranscriptionResult = manager.stop()
         result = command_router.handle(
             transcription.text,
@@ -382,7 +492,10 @@ def microphone_responses(
     limit: int = Query(default=10, ge=1, le=50),
     drain: bool = True,
     manager: ListeningCoordinator = Depends(get_microphone_manager),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: DbSession = Depends(get_session),
 ) -> MicrophoneResponseQueue:
+    _classroom_context(session_id, credentials, db)
     return MicrophoneResponseQueue(items=manager.poll(session_id, limit=limit, drain=drain))
 
 
@@ -390,9 +503,13 @@ def microphone_responses(
 def pause_microphone(
     body: MicrophoneControlBody | None = None,
     manager: ListeningCoordinator = Depends(get_microphone_manager),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: DbSession = Depends(get_session),
 ) -> dict:
+    session_id = (body or MicrophoneControlBody()).session_id
+    _classroom_context(session_id, credentials, db)
     try:
-        return manager.pause((body or MicrophoneControlBody()).session_id)
+        return manager.pause(session_id)
     except MicrophoneError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
@@ -401,17 +518,32 @@ def pause_microphone(
 def resume_microphone(
     body: MicrophoneControlBody | None = None,
     manager: ListeningCoordinator = Depends(get_microphone_manager),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: DbSession = Depends(get_session),
 ) -> dict:
+    session_id = (body or MicrophoneControlBody()).session_id
+    _classroom_context(session_id, credentials, db)
     try:
-        return manager.resume((body or MicrophoneControlBody()).session_id)
+        return manager.resume(session_id)
     except MicrophoneError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.post("/microphone/cancel")
-def cancel_microphone(manager: ListeningCoordinator = Depends(get_microphone_manager)) -> dict:
+def cancel_microphone(
+    manager: ListeningCoordinator = Depends(get_microphone_manager),
+    body: MicrophoneControlBody | None = None,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: DbSession = Depends(get_session),
+) -> dict:
+    session_id = (body or MicrophoneControlBody()).session_id
+    _classroom_context(session_id, credentials, db)
     try:
+        if isinstance(manager, ListeningCoordinator):
+            return manager.cancel(session_id)
         return manager.cancel()
+    except MicrophoneBusyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except MicrophoneError as error:
         raise HTTPException(status_code=503, detail="microphone could not be released") from error
 
@@ -420,5 +552,9 @@ def cancel_microphone(manager: ListeningCoordinator = Depends(get_microphone_man
 def reset_microphone_memory(
     body: MicrophoneControlBody | None = None,
     manager: ListeningCoordinator = Depends(get_microphone_manager),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: DbSession = Depends(get_session),
 ) -> dict:
-    return manager.reset_memory((body or MicrophoneControlBody()).session_id)
+    session_id = (body or MicrophoneControlBody()).session_id
+    _classroom_context(session_id, credentials, db)
+    return manager.reset_memory(session_id)

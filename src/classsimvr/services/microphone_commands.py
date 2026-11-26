@@ -8,6 +8,7 @@ import unicodedata
 
 from .behavior import BehaviorService, classify_teacher_input
 from .contracts import BehaviorRequest, BehaviorResponse
+from .session_contracts import ClassroomContext
 from .tts import TextToSpeechService
 from .student_registry import StudentNotFoundError, StudentProfile, StudentRegistry
 
@@ -73,6 +74,7 @@ class MicrophoneCommandRouter:
         recent_turns: list[dict[str, str]] | None = None,
         default_persona_id: str = "maria-sandoval",
         selected_grade_level: str | None = None,
+        classroom_context: ClassroomContext | None = None,
     ) -> CommandResult:
         pipeline_started = time.perf_counter()
         self._last_latency_ms = dict.fromkeys(self._last_latency_ms)
@@ -91,7 +93,9 @@ class MicrophoneCommandRouter:
                 session_id,
                 self.registry.lower_raised_hands(session_id, reason="new_invitation"),
             )
-            result = self._handle_classroom_invitation(session_id, invitation_text=transcript)
+            result = self._handle_classroom_invitation(
+                session_id, invitation_text=transcript, classroom_context=classroom_context
+            )
             result = CommandResult(
                 target=result.target,
                 responses=lifecycle_responses + lowered + result.responses,
@@ -103,7 +107,7 @@ class MicrophoneCommandRouter:
         # A teacher may invite volunteers, but cannot directly force a student
         # to raise a hand. Treat direct raise-hand wording as a no-op.
         if self._is_direct_raise_hand_command(transcript):
-            logger.info("Ignored direct raise-hand command transcript=%r", transcript)
+            logger.info("Ignored direct raise-hand command")
             return CommandResult(
                 target="classroom" if lifecycle_responses else "none",
                 responses=lifecycle_responses,
@@ -156,6 +160,7 @@ class MicrophoneCommandRouter:
                     if selected_grade_level is not None
                     else self.registry.get_selected_grade_level(session_id)
                 ),
+                classroom_context=classroom_context,
                 academic_behavior_enabled=(
                     (student.knowledge_level == "INTERMEDIATE" or student.academic_behavior_enabled)
                     and "THINKING" in student.supported_actions
@@ -258,7 +263,9 @@ class MicrophoneCommandRouter:
         target = "classroom" if len(target_students) > 1 else target_students[0].student_id
         return CommandResult(target=target, responses=responses)
 
-    def _handle_classroom_invitation(self, session_id: str, *, invitation_text: str = "") -> CommandResult:
+    def _handle_classroom_invitation(
+        self, session_id: str, *, invitation_text: str = "", classroom_context: ClassroomContext | None = None
+    ) -> CommandResult:
         """Ask the behavior service for one independent decision per registered student."""
         question = self.registry.get_classroom_question(session_id) or invitation_text.strip()
         students = self.registry.list_students()
@@ -273,7 +280,8 @@ class MicrophoneCommandRouter:
                 students, round_number=round_number
             )
         else:
-            decisions = decide(question, students, round_number=round_number)
+            context_options = {"classroom_context": classroom_context} if classroom_context else {}
+            decisions = decide(question, students, round_number=round_number, **context_options)
         allowed_ids = {student.student_id for student in students}
         responses: list[BehaviorResponse] = []
         for student in students:
@@ -343,8 +351,7 @@ class MicrophoneCommandRouter:
             self._last_latency_ms["student_name_detection"] = round(
                 (time.perf_counter() - name_started) * 1000, 2
             )
-            logger.info("Standalone student call matched transcript=%r student=%s",
-                        transcript, student.student_id)
+            logger.info("Standalone student call matched student=%s", student.student_id)
             return [student]
         resolution = self.registry.resolve_with_status(text)
         self._last_latency_ms["student_name_detection"] = round(
@@ -352,8 +359,7 @@ class MicrophoneCommandRouter:
         )
         if resolution.ambiguous:
             logger.warning(
-                "Student routing rejected ambiguous address transcript=%r aliases=%s",
-                transcript,
+                "Student routing rejected ambiguous address aliases=%s",
                 resolution.matched_aliases,
             )
             return []
@@ -362,30 +368,25 @@ class MicrophoneCommandRouter:
                 transcript, resolution.profile, resolution.matched_aliases
             ):
                 logger.info(
-                    "Student routing ignored incidental name mention transcript=%r student=%s",
-                    transcript,
+                    "Student routing ignored incidental name mention student=%s",
                     resolution.profile.student_id,
                 )
                 return []
             logger.info(
-                "Student routing matched transcript=%r student=%s aliases=%s",
-                transcript,
+                "Student routing matched student=%s aliases=%s",
                 resolution.profile.student_id,
                 resolution.matched_aliases,
             )
             return [resolution.profile]
 
         if self._has_explicit_address(transcript):
-            logger.warning(
-                "Student routing rejected unrecognized explicit address transcript=%r",
-                transcript,
-            )
+            logger.warning("Student routing rejected unrecognized explicit address")
             return []
 
         classroom_wide = self._is_classroom_wide(transcript)
         if classroom_wide:
             return self.registry.list_students()
-        logger.info("No explicit student address; ignoring individual transcript=%r", transcript)
+        logger.info("No explicit student address; ignoring individual transcript")
         return []
 
     @staticmethod

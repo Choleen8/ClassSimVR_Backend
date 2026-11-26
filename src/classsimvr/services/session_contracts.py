@@ -1,11 +1,54 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from .persona_contracts import AssignedPersonaResponse
+
+
+# IDs and grade ranges match Unreal's ElementaryCurriculum catalog.
+ELEMENTARY_SUBJECTS = {
+    "Language": (1, 1, "Language"),
+    "ReadingAndLiteracy": (1, 1, "Reading and Literacy"),
+    "English": (2, 6, "English"),
+    "Filipino": (2, 6, "Filipino"),
+    "Mathematics": (1, 6, "Mathematics"),
+    "Science": (3, 6, "Science"),
+    "Makabansa": (1, 3, "Makabansa"),
+    "AralingPanlipunan": (4, 6, "Araling Panlipunan"),
+    "GMRC": (1, 6, "Good Manners and Right Conduct"),
+    "EPP": (4, 6, "Edukasyong Pantahanan at Pangkabuhayan"),
+    "MusicAndArts": (4, 6, "Music and Arts"),
+    "PhysicalEducationAndHealth": (4, 6, "Physical Education and Health"),
+}
+ELEMENTARY_GRADES = {f"Grade {n}": n for n in range(1, 7)}
+
+
+@dataclass(frozen=True)
+class ClassroomContext:
+    grade: str
+    subject: str
+    session_mode: Literal["practice", "assessment"]
+
+    @classmethod
+    def from_selection(cls, grade: str | None, subject: str | None, mode: str) -> "ClassroomContext":
+        number = ELEMENTARY_GRADES.get(grade)
+        details = ELEMENTARY_SUBJECTS.get(subject)
+        if not number or not details or not details[0] <= number <= details[1]:
+            raise ValueError("subject is not available for the selected elementary grade")
+        if mode not in ("practice", "assessment"):
+            raise ValueError("invalid classroom session mode")
+        return cls(grade, subject, mode)
+
+    @property
+    def subject_label(self) -> str:
+        return ELEMENTARY_SUBJECTS[self.subject][2]
+
+    def prompt_context(self) -> dict[str, str]:
+        return {"grade": self.grade, "subject": self.subject_label, "session_mode": self.session_mode}
 
 
 MIN_CLASS_SIZE = 15
@@ -51,8 +94,16 @@ class SessionCreate(BaseModel):
     class_size: int | None = Field(default=None, ge=MIN_CLASS_SIZE, le=MAX_CLASS_SIZE)
     difficulty: str | None = Field(default=None, max_length=50)
 
+    start_immediately: bool = Field(default=False, exclude=True)
+
     @model_validator(mode="after")
     def validate_teaching_setup(self) -> "SessionCreate":
+        if self.start_immediately or (self.subject and self.grade in ELEMENTARY_GRADES):
+            ClassroomContext.from_selection(self.grade, self.subject, self.session_mode)
+            if self.topic and self.topic not in TOPICS_BY_SUBJECT.get(self.subject, ()):
+                raise ValueError("topic is not available for the selected subject")
+            return self
+
         if self.topic and not self.subject:
             raise ValueError("topic requires a subject")
         if self.subject and not self.grade:

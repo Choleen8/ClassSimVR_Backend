@@ -51,6 +51,7 @@ class Report(Base):
     summary: Mapped[str | None] = mapped_column(Text)
     next_focus: Mapped[str | None] = mapped_column(Text)
     model_assess: Mapped[str | None] = mapped_column(Text)
+    transcript_feedback: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
@@ -68,10 +69,12 @@ class Turn(Base):
     session_id: Mapped[int] = mapped_column(
         ForeignKey("session.session_id", ondelete="CASCADE"), nullable=False
     )
-    persona_id: Mapped[int] = mapped_column(
-        ForeignKey("persona.persona_id"), nullable=False
+    persona_id: Mapped[int | None] = mapped_column(
+        ForeignKey("persona.persona_id")
     )
     t_offset_s: Mapped[float | None] = mapped_column(Float)
+    t_end_offset_s: Mapped[float | None] = mapped_column(Float)
+    student_actor_tag: Mapped[str | None] = mapped_column(String(128))
     teacher_text: Mapped[str | None] = mapped_column(Text)
     learner_text: Mapped[str | None] = mapped_column(Text)
     emotion: Mapped[str | None] = mapped_column(String(100))
@@ -79,7 +82,7 @@ class Turn(Base):
     source: Mapped[str | None] = mapped_column(String(100))
 
     session: Mapped["Session"] = relationship("Session", back_populates="turns")
-    persona: Mapped["Persona"] = relationship("Persona", back_populates="turns")
+    persona: Mapped["Persona | None"] = relationship("Persona", back_populates="turns")
 
 
 class SessionPersona(Base):

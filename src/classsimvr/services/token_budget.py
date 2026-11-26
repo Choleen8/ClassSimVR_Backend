@@ -113,6 +113,7 @@ class TokenBudget:
         supported_actions: list[str] | None = None,
         academic_difficulty: str | None = None,
         academic_behavior: str | None = None,
+        classroom_context: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         fixed = {
             "persona_id": persona_id,
@@ -125,6 +126,8 @@ class TokenBudget:
         }
         # An omitted selection is explicit; never let the model infer College.
         fixed["grade_level"] = grade_level or "UNSELECTED"
+        if classroom_context:
+            fixed["classroom_session"] = classroom_context
         if academic_difficulty:
             fixed["academic_difficulty"] = academic_difficulty
         if academic_behavior:

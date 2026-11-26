@@ -120,6 +120,15 @@ Assessment output should use these standards as structured data, not as unvalida
 - Philippine privacy/compliance baseline and privacy-notice template under `docs/compliance/`.
 - Turn-ingestion route that validates session/persona assignment before persistence.
 - PPST/BTI rubric endpoint and validated asynchronous assessment-job queue/status contract.
+- The Unreal timed Assessment uses an authenticated evidence window. The existing Whisper
+  and response-queue paths persist teacher transcripts and queued student events to `TURN`
+  for that window only. An OpenAI worker produces formative transcript feedback, then saves
+  the report and applicable indicator scores through the existing assessment models.
+- Transcript feedback is supplementary to multimodal assessment. Without approved score
+  anchors, cited findings remain qualitative. An overall score is unavailable until the
+  project defines an approved aggregation rule. Set `OPENAI_ASSESSMENT_MODEL` only when an
+  assessment-specific OpenAI model is configured. Optional `ASSESSMENT_APPROVED_SCORE_ANCHORS`
+  maps BTI codes to four approved descriptions in ascending score order.
 - Versioned Unreal behavior route:
   `POST /api/v1/sessions/{session_id}/personas/{persona_id}/turn`
   The client sends trainee input and optional scene/history context; the server resolves the assigned persona and runtime state.
@@ -194,6 +203,8 @@ DELETE /api/v1/sessions/{session_id}/consent
 POST   /api/v1/sessions/{session_id}/recording/start
 POST   /api/v1/sessions/{session_id}/recording/complete
 GET    /api/v1/assessment/rubric
+POST   /api/v1/sessions/{session_id}/assessment/window
+DELETE /api/v1/sessions/{session_id}/assessment/window
 POST   /api/v1/sessions/{session_id}/assessment
 GET    /api/v1/assessment/jobs/{job_id}
 POST   /api/v1/assessment/jobs/{job_id}/result

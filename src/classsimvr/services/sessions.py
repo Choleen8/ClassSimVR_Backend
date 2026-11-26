@@ -61,6 +61,9 @@ class SessionService:
         if db.get(Trainee, data.trainee_id) is None:
             raise TraineeNotFoundError(f"trainee {data.trainee_id} was not found")
         session = Session(**data.model_dump())
+        if data.start_immediately:
+            session.status = "running"
+            session.started_at = datetime.now(timezone.utc)
         db.add(session)
         db.commit()
         db.refresh(session)

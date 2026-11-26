@@ -51,6 +51,9 @@ class Session(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    assessment_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    assessment_ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    assessment_notice_version: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )

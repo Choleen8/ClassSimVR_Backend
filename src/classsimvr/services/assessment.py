@@ -67,10 +67,10 @@ class AssessmentService:
         return job
 
     def complete_assessment(
-        self, db: DbSession, job_id: int, data: AssessmentResult
+        self, db: DbSession, job_id: int, data: AssessmentResult, *, transcript_feedback: dict | None = None
     ) -> CompletedAssessment:
         job = self.get_job(db, job_id)
-        if job.status != "pending":
+        if job.status != ("running" if transcript_feedback is not None else "pending"):
             raise AssessmentStateError("assessment job is not pending")
         rubric_by_code = {item.bti_code: item for item in list_bti_rubric()}
         report = Report(
@@ -78,6 +78,7 @@ class AssessmentService:
             summary=data.summary,
             next_focus=data.next_focus,
             model_assess=data.model_assess,
+            transcript_feedback=transcript_feedback,
         )
         db.add(report)
         db.flush()
